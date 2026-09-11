@@ -6,6 +6,8 @@ type AgentRowProps = {
 };
 
 export function AgentRow({ session }: AgentRowProps) {
+  const showProject = session.project.name !== session.title;
+
   return (
     <li className="agent-row">
       <button
@@ -16,8 +18,21 @@ export function AgentRow({ session }: AgentRowProps) {
         }}
       >
         <span className={`status-glyph status-${session.status}`} aria-hidden />
-        <span className="agent-label">Cursor</span>
-        <span className="project-label">{session.project.name}</span>
+        <span className="session-title">{session.title}</span>
+        {showProject ? (
+          <span className="project-label">{session.project.name}</span>
+        ) : (
+          <span className="project-label project-label-spacer" aria-hidden />
+        )}
+      </button>
+      <button
+        type="button"
+        className="dismiss-button"
+        onClick={() => {
+          invoke("dismiss_session", { id: session.id }).catch(() => undefined);
+        }}
+      >
+        Dismiss
       </button>
     </li>
   );

@@ -1,16 +1,19 @@
 :root {
   color-scheme: dark;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  font-size: 12.5px;
-  line-height: 1.4;
+  font-size: 12px;
+  line-height: 1.35;
   --hud-bg: rgba(24, 24, 26, 0.72);
   --hud-border: rgba(255, 255, 255, 0.12);
   --hud-text: rgba(255, 255, 255, 0.72);
   --hud-text-strong: rgba(255, 255, 255, 0.94);
+  --hud-text-muted: rgba(255, 255, 255, 0.5);
   --hud-hover: rgba(255, 255, 255, 0.08);
   --status-working: #5ac8fa;
   --status-waiting: rgba(255, 255, 255, 0.45);
   --status-attention: #ffcc00;
+  --status-completed: #30d158;
+  --hud-radius: 12px;
 }
 
 *,
@@ -34,18 +37,18 @@ body {
 
 .hud-root {
   width: 280px;
-  padding: 8px;
+  padding: 5px;
   border: 1px solid var(--hud-border);
-  border-radius: 12px;
+  border-radius: var(--hud-radius);
   background: var(--hud-bg);
   backdrop-filter: blur(18px);
   overflow: hidden;
 }
 
 .hud-drag-handle {
-  height: 8px;
-  margin: -8px -8px 4px;
-  border-radius: 12px 12px 0 0;
+  height: 5px;
+  margin: -5px -5px 2px;
+  border-radius: var(--hud-radius) var(--hud-radius) 0 0;
   cursor: grab;
 }
 
@@ -53,58 +56,98 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: calc(28px * 8);
+  max-height: calc(22px * 8);
   overflow-y: auto;
 }
 
 .agent-row {
   margin: 0;
+  height: 22px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  border-radius: 5px;
+}
+
+.agent-row:hover {
+  background: var(--hud-hover);
 }
 
 .agent-row-button {
-  width: 100%;
-  height: 28px;
+  min-width: 0;
+  height: 22px;
   display: grid;
-  grid-template-columns: 14px auto 1fr;
+  grid-template-columns: 8px 1fr auto;
   align-items: center;
-  gap: 8px;
-  padding: 0 6px;
+  gap: 6px;
+  padding: 0;
   border: 0;
-  border-radius: 6px;
   background: transparent;
   color: var(--hud-text);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 80ms ease;
 }
 
-.agent-row-button:hover,
 .agent-row-button:focus-visible {
-  background: var(--hud-hover);
   outline: none;
 }
 
-.agent-row-button:hover .status-glyph::before {
+.agent-row-button:hover .status-glyph:not(.status-completed)::before {
   content: "▸";
   color: var(--hud-text-strong);
-  font-size: 10px;
+  font-size: 9px;
 }
 
-.agent-label {
-  color: var(--hud-text);
+.agent-row:hover .project-label {
+  display: none;
+}
+
+.project-label-spacer {
+  visibility: hidden;
+}
+
+.dismiss-button {
+  display: none;
+  flex-shrink: 0;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--hud-text-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agent-row:hover .dismiss-button {
+  display: inline;
+}
+
+.session-title {
+  min-width: 0;
+  color: var(--hud-text-strong);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-label {
-  color: var(--hud-text-strong);
+  flex-shrink: 0;
+  max-width: 88px;
+  color: var(--hud-text-muted);
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .status-glyph {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   display: inline-block;
   position: relative;
@@ -116,7 +159,7 @@ body {
 
 .status-working {
   background: var(--status-working);
-  box-shadow: 0 0 6px rgba(90, 200, 250, 0.55);
+  box-shadow: 0 0 5px rgba(90, 200, 250, 0.55);
   animation: pulse 1.6s ease-in-out infinite;
 }
 
@@ -129,6 +172,10 @@ body {
   background: var(--status-attention);
   border-radius: 2px;
   transform: rotate(45deg);
+}
+
+.status-completed {
+  background: var(--status-completed);
 }
 
 @keyframes pulse {

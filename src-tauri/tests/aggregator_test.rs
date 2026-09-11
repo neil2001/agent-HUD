@@ -1,5 +1,6 @@
 use agent_hud_lib::sessions::cursor::{map_cloud_activity, map_composer_activity};
-use agent_hud_lib::sessions::AgentStatus;
+use agent_hud_lib::sessions::{AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
+use agent_hud_lib::state::AppState;
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -76,7 +77,7 @@ fn live_discover_prints_session_count() {
         sessions.len(),
         sessions
             .iter()
-            .map(|s| format!("{}:{:?}", s.project.name, s.status))
+            .map(|s| format!("{}|{}:{:?}", s.title, s.project.name, s.status))
             .collect::<Vec<_>>()
     );
 }
@@ -108,13 +109,13 @@ fn completed_status_without_fresh_activity_is_inactive() {
         now,
     );
     assert!(!active);
-    assert_eq!(status, AgentStatus::Working);
+    assert_eq!(status, AgentStatus::Waiting);
 }
 
 #[test]
-fn completed_status_with_fresh_header_is_waiting() {
+fn completed_status_with_fresh_header_is_inactive() {
     let now = 1_700_000_010_000;
-    let (status, active) = map_composer_activity(
+    let (_, active) = map_composer_activity(
         Some("completed"),
         now,
         None,
@@ -123,8 +124,22 @@ fn completed_status_with_fresh_header_is_waiting() {
         false,
         now,
     );
-    assert!(active);
-    assert_eq!(status, AgentStatus::Waiting);
+    assert!(!active);
+}
+
+#[test]
+fn completed_status_with_fresh_transcript_is_inactive() {
+    let now = 1_700_000_010_000;
+    let (_, active) = map_composer_activity(
+        Some("completed"),
+        1_700_000_000_000,
+        Some(now),
+        false,
+        false,
+        false,
+        now,
+    );
+    assert!(!active);
 }
 
 #[test]
@@ -168,11 +183,65 @@ fn stale_none_status_is_inactive() {
 }
 
 #[test]
+fn cloud_idle_even_if_recent_is_inactive() {
+    let now = 1_700_000_010_000;
+    let (_, active) = map_cloud_activity(Some(0), Some(0), now, false, now);
+    assert!(!active);
+}
+
+#[test]
 fn cloud_running_status_is_active() {
     let now = 1_700_000_010_000;
     let (status, active) = map_cloud_activity(Some(1), Some(1), now, false, now);
     assert!(active);
     assert_eq!(status, AgentStatus::Working);
+}
+
+fn sample_session(id: &str, status: AgentStatus) -> AgentSession {
+    AgentSession {
+        id: id.to_string(),
+        agent: AgentKind::Cursor,
+        title: "Test session".to_string(),
+        project: ProjectInfo {
+            name: "agent-HUD".to_string(),
+            path: Some("/Users/test/Projects/agent-HUD".to_string()),
+        },
+        status,
+        host: SessionHost::CursorDesktop {
+            workspace_path: "/Users/test/Projects/agent-HUD".to_string(),
+        },
+        updated_at: 1_700_000_010_000,
+    }
+}
+
+#[test]
+fn merge_keeps_recently_live_session_as_completed() {
+    let state = AppState::new();
+    let live = vec![sample_session("agent-1", AgentStatus::Working)];
+    let merged = state.merge_sessions(live);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::Working);
+
+    let merged = state.merge_sessions(Vec::new());
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::Completed);
+}
+
+#[test]
+fn dismiss_removes_completed_session_until_live_again() {
+    let state = AppState::new();
+    state.merge_sessions(vec![sample_session("agent-1", AgentStatus::Working)]);
+    state.merge_sessions(Vec::new());
+
+    let dismissed = state.dismiss_session("agent-1");
+    assert!(dismissed.is_empty());
+
+    let merged = state.merge_sessions(Vec::new());
+    assert!(merged.is_empty());
+
+    let merged = state.merge_sessions(vec![sample_session("agent-1", AgentStatus::NeedsAttention)]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::NeedsAttention);
 }
 
 #[test]

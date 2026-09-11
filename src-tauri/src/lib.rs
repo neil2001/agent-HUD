@@ -1,7 +1,7 @@
 mod focus;
 mod lifecycle;
 pub mod sessions;
-mod state;
+pub mod state;
 mod window;
 
 use std::sync::Arc;
@@ -17,8 +17,30 @@ fn get_sessions(state: tauri::State<Arc<AppState>>) -> Vec<sessions::AgentSessio
 }
 
 #[tauri::command]
-fn focus_session(state: tauri::State<Arc<AppState>>, id: String) -> Result<(), String> {
-    focus::focus_session(state.inner(), &id)
+fn focus_session(
+    app: tauri::AppHandle,
+    state: tauri::State<Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    focus::focus_session(state.inner(), &id)?;
+    let sessions = state.inner().dismiss_session(&id);
+    aggregator::apply_sessions(&app, state.inner(), sessions);
+    Ok(())
+}
+
+#[tauri::command]
+fn dismiss_session(
+    app: tauri::AppHandle,
+    state: tauri::State<Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .inner()
+        .find_session(&id)
+        .ok_or_else(|| "Session not found".to_string())?;
+    let sessions = state.inner().dismiss_session(&id);
+    aggregator::apply_sessions(&app, state.inner(), sessions);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -50,7 +72,11 @@ pub fn run() {
             );
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_sessions, focus_session]);
+        .invoke_handler(tauri::generate_handler![
+            get_sessions,
+            focus_session,
+            dismiss_session
+        ]);
 
     init_autostart(builder)
         .run(tauri::generate_context!())

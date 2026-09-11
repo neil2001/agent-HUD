@@ -10,9 +10,8 @@ use serde_json::Value;
 use super::sqlite::{
     json_from_row, open_readonly, read_disk_kv_json, read_item_json, row_bool, row_opt_i64,
 };
-use super::{AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
+use super::{sort_agent_sessions, AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
 
-const STALE_MS: i64 = 600_000;
 const TRANSCRIPT_FRESH_MS: i64 = 600_000;
 
 pub fn cursor_support_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
@@ -79,7 +78,7 @@ pub fn discover_active_sessions() -> Vec<AgentSession> {
         .filter(|session| session.is_active())
         .collect();
 
-    sort_sessions(&mut active);
+    sort_agent_sessions(&mut active);
     active
 }
 
@@ -129,11 +128,7 @@ fn collect_from_composer_headers(
             .and_then(|data| data.get("status"))
             .and_then(|v| v.as_str());
 
-        let generating = composer_data
-            .as_ref()
-            .and_then(|data| data.get("generatingBubbleIds"))
-            .map(value_is_nonempty)
-            .unwrap_or(false);
+        let generating = is_generating(composer_data.as_ref(), status_str);
 
         let continuation = composer_data
             .as_ref()
@@ -141,11 +136,7 @@ fn collect_from_composer_headers(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let pending = composer_data
-            .as_ref()
-            .and_then(|data| data.get("hasUnreadMessages"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let pending = needs_prompt(&header.value, composer_data.as_ref());
 
         let (status, active) = map_composer_activity(
             status_str,
@@ -162,13 +153,19 @@ fn collect_from_composer_headers(
         }
 
         let workspace_path = workspace_path_from_value(&header.value);
-        let project_name = project_name_from_path(&workspace_path, &header.value);
+        let project_name = project_basename(&workspace_path);
+        let title = session_title_from_value(
+            &header.value,
+            composer_data.as_ref(),
+            &project_name,
+        );
 
         out.insert(
             header.id.clone(),
             AgentSession {
                 id: header.id.clone(),
                 agent: AgentKind::Cursor,
+                title,
                 project: ProjectInfo {
                     name: project_name,
                     path: workspace_path.clone(),
@@ -244,25 +241,21 @@ fn collect_from_cloud_agents(conn: &Connection, now_ms: i64, out: &mut HashMap<S
                 .filter(|p| !p.is_empty())
                 .map(|p| p.to_string());
 
-            let name = agent
+            let project_name = project_basename(&workspace_path);
+            let title = agent
                 .get("name")
                 .and_then(|v| v.as_str())
-                .filter(|n| !n.is_empty())
-                .map(|n| n.to_string())
-                .or_else(|| {
-                    workspace_path.as_deref().and_then(|p| {
-                        Path::new(p)
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                    })
-                })
-                .unwrap_or_else(|| "cloud".to_string());
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| project_name.clone());
 
             out.entry(id.to_string()).or_insert(AgentSession {
                 id: id.to_string(),
                 agent: AgentKind::Cursor,
+                title,
                 project: ProjectInfo {
-                    name,
+                    name: project_name,
                     path: workspace_path.clone(),
                 },
                 status,
@@ -333,13 +326,20 @@ fn collect_from_workspace_fallback(
                 .unwrap_or(0);
 
             let transcript_ts = transcript_activity.get(id).copied();
+            let status_str = composer.get("status").and_then(|v| v.as_str());
+            let generating = is_generating(Some(&composer), status_str);
+            let continuation = composer
+                .get("isContinuationInProgress")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let pending = needs_prompt(&composer, None);
             let (status, active) = map_composer_activity(
-                None,
+                status_str,
                 updated_at,
                 transcript_ts,
-                false,
-                false,
-                false,
+                generating,
+                continuation,
+                pending,
                 now_ms,
             );
 
@@ -347,12 +347,14 @@ fn collect_from_workspace_fallback(
                 continue;
             }
 
-            let project_name = project_name_from_path(&workspace_path, &composer);
+            let project_name = project_basename(&workspace_path);
+            let title = session_title_from_value(&composer, None, &project_name);
             out.insert(
                 id.to_string(),
                 AgentSession {
                     id: id.to_string(),
                     agent: AgentKind::Cursor,
+                    title,
                     project: ProjectInfo {
                         name: project_name,
                         path: workspace_path.clone(),
@@ -490,75 +492,70 @@ fn collect_transcript_dir(dir: &Path, now_ms: i64, out: &mut HashMap<String, i64
 }
 
 pub fn map_composer_activity(
-    status: Option<&str>,
-    updated_at: i64,
-    transcript_ts: Option<i64>,
+    _status: Option<&str>,
+    _updated_at: i64,
+    _transcript_ts: Option<i64>,
     generating: bool,
     continuation: bool,
     pending: bool,
-    now_ms: i64,
+    _now_ms: i64,
 ) -> (AgentStatus, bool) {
-    let fresh = updated_at > 0 && now_ms - updated_at <= STALE_MS;
-    let transcript_fresh = transcript_ts
-        .map(|ts| now_ms - ts <= TRANSCRIPT_FRESH_MS)
-        .unwrap_or(false);
-
-    if matches!(status, Some("completed") | Some("aborted") | Some("error")) {
-        if transcript_fresh || generating || continuation {
-            return (AgentStatus::Working, true);
-        }
-        if pending && fresh {
-            return (AgentStatus::NeedsAttention, true);
-        }
-        if fresh {
-            // Cursor often leaves status=completed while a follow-up turn is still live.
-            return (AgentStatus::Waiting, true);
-        }
-        return (AgentStatus::Working, false);
-    }
-
-    if !fresh && !transcript_fresh && !generating && !continuation {
-        return (AgentStatus::Working, false);
-    }
-
     if pending {
         return (AgentStatus::NeedsAttention, true);
     }
 
-    if generating || continuation || transcript_fresh {
+    if generating || continuation {
         return (AgentStatus::Working, true);
     }
 
-    if fresh {
-        return (AgentStatus::Waiting, true);
-    }
-
-    (AgentStatus::Working, false)
+    (AgentStatus::Waiting, false)
 }
 
 pub fn map_cloud_activity(
     status: Option<i64>,
     workflow: Option<i64>,
-    updated_at: i64,
+    _updated_at: i64,
     pending: bool,
-    now_ms: i64,
+    _now_ms: i64,
 ) -> (AgentStatus, bool) {
-    let fresh = updated_at > 0 && now_ms - updated_at <= STALE_MS;
     let running = matches!(status, Some(1)) || matches!(workflow, Some(1));
-
-    if !fresh && !running {
-        return (AgentStatus::Working, false);
-    }
 
     if pending {
         return (AgentStatus::NeedsAttention, true);
     }
 
-    if running || fresh {
+    if running {
         return (AgentStatus::Working, true);
     }
 
-    (AgentStatus::Waiting, true)
+    (AgentStatus::Waiting, false)
+}
+
+fn is_generating(composer_data: Option<&Value>, status: Option<&str>) -> bool {
+    if matches!(status, Some("generating")) {
+        return true;
+    }
+
+    composer_data
+        .and_then(|data| data.get("generatingBubbleIds"))
+        .map(value_is_nonempty)
+        .unwrap_or(false)
+}
+
+fn needs_prompt(header: &Value, composer_data: Option<&Value>) -> bool {
+    json_flag(header, "hasBlockingPendingActions")
+        || json_flag(header, "hasPendingPlan")
+        || composer_data
+            .map(|data| {
+                json_flag(data, "hasBlockingPendingActions")
+                    || json_flag(data, "hasPendingPlan")
+                    || json_flag(data, "pendingCreateWorktree")
+            })
+            .unwrap_or(false)
+}
+
+fn json_flag(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn is_agent_session(header: &Value, composer_data: Option<&Value>) -> bool {
@@ -613,36 +610,39 @@ fn workspace_json_path(path: &Path) -> Option<String> {
         .map(|uri| uri.trim_start_matches("file://").to_string())
 }
 
-fn project_name_from_path(workspace_path: &Option<String>, value: &Value) -> String {
-    if let Some(path) = workspace_path {
-        if let Some(name) = Path::new(path).file_name() {
-            return name.to_string_lossy().to_string();
+fn project_basename(workspace_path: &Option<String>) -> String {
+    workspace_path
+        .as_ref()
+        .and_then(|path| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "agent".to_string())
+}
+
+fn session_title_from_value(
+    value: &Value,
+    composer_data: Option<&Value>,
+    project_name: &str,
+) -> String {
+    let candidates = [
+        value.get("name").and_then(|v| v.as_str()),
+        value.get("subtitle").and_then(|v| v.as_str()),
+        composer_data.and_then(|data| data.get("name")).and_then(|v| v.as_str()),
+        composer_data
+            .and_then(|data| data.get("subtitle"))
+            .and_then(|v| v.as_str()),
+    ];
+
+    for candidate in candidates {
+        if let Some(name) = candidate {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
         }
     }
 
-    value
-        .get("name")
-        .and_then(|v| v.as_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or("agent")
-        .to_string()
-}
-
-fn sort_sessions(sessions: &mut [AgentSession]) {
-    sessions.sort_by(|a, b| {
-        status_rank(a.status)
-            .cmp(&status_rank(b.status))
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-}
-
-fn status_rank(status: AgentStatus) -> u8 {
-    match status {
-        AgentStatus::NeedsAttention => 0,
-        AgentStatus::Working => 1,
-        AgentStatus::Waiting => 2,
-    }
+    project_name.to_string()
 }
 
 fn now_ms() -> i64 {

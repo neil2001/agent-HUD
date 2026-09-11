@@ -1,9 +1,9 @@
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Size};
 
 pub const HUD_WIDTH: f64 = 280.0;
-pub const HUD_HANDLE_HEIGHT: f64 = 8.0;
-pub const HUD_ROW_HEIGHT: f64 = 28.0;
-pub const HUD_PADDING: f64 = 16.0;
+pub const HUD_HANDLE_HEIGHT: f64 = 5.0;
+pub const HUD_ROW_HEIGHT: f64 = 22.0;
+pub const HUD_PADDING: f64 = 10.0;
 pub const HUD_MAX_VISIBLE_ROWS: usize = 8;
 const STORE_PATH: &str = "hud-window.json";
 const POSITION_KEY: &str = "position";

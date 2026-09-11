@@ -1,4 +1,8 @@
-export type AgentStatus = "working" | "waiting" | "needs_attention";
+export type AgentStatus =
+  | "working"
+  | "waiting"
+  | "needs_attention"
+  | "completed";
 
 export type AgentKind = "cursor";
 
@@ -9,6 +13,7 @@ export type SessionHost =
 export type AgentSession = {
   id: string;
   agent: AgentKind;
+  title: string;
   project: {
     name: string;
     path?: string;

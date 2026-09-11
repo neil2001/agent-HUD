@@ -5,6 +5,7 @@ use std::time::Duration;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter};
 
+use crate::sessions::AgentSession;
 use crate::state::AppState;
 use crate::window::sync_visibility;
 
@@ -20,6 +21,16 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
             publish(&app, &state);
             let _ = rx.recv_timeout(Duration::from_secs(1));
         }
+    });
+}
+
+pub fn apply_sessions(app: &AppHandle, _state: &AppState, sessions: Vec<AgentSession>) {
+    let count = sessions.len();
+    let _ = app.emit("sessions-changed", &sessions);
+
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        sync_visibility(&handle, count);
     });
 }
 
@@ -45,14 +56,7 @@ fn setup_watcher(tx: mpsc::Sender<()>) -> Option<RecommendedWatcher> {
 }
 
 fn publish(app: &AppHandle, state: &Arc<AppState>) {
-    let sessions = discover_active_sessions();
-    state.set_sessions(sessions.clone());
-
-    let _ = app.emit("sessions-changed", &sessions);
-
-    let handle = app.clone();
-    let count = sessions.len();
-    let _ = app.run_on_main_thread(move || {
-        sync_visibility(&handle, count);
-    });
+    let live = discover_active_sessions();
+    let sessions = state.merge_sessions(live);
+    apply_sessions(app, state, sessions);
 }
