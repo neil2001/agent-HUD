@@ -1,0 +1,152 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-size: 12.5px;
+  line-height: 1.4;
+  --hud-bg: rgba(24, 24, 26, 0.72);
+  --hud-border: rgba(255, 255, 255, 0.12);
+  --hud-text: rgba(255, 255, 255, 0.72);
+  --hud-text-strong: rgba(255, 255, 255, 0.94);
+  --hud-hover: rgba(255, 255, 255, 0.08);
+  --status-working: #5ac8fa;
+  --status-waiting: rgba(255, 255, 255, 0.45);
+  --status-attention: #ffcc00;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: transparent;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.hud-root {
+  width: 280px;
+  padding: 8px;
+  border: 1px solid var(--hud-border);
+  border-radius: 12px;
+  background: var(--hud-bg);
+  backdrop-filter: blur(18px);
+  overflow: hidden;
+}
+
+.hud-drag-handle {
+  height: 8px;
+  margin: -8px -8px 4px;
+  border-radius: 12px 12px 0 0;
+  cursor: grab;
+}
+
+.agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: calc(28px * 8);
+  overflow-y: auto;
+}
+
+.agent-row {
+  margin: 0;
+}
+
+.agent-row-button {
+  width: 100%;
+  height: 28px;
+  display: grid;
+  grid-template-columns: 14px auto 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--hud-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+
+.agent-row-button:hover,
+.agent-row-button:focus-visible {
+  background: var(--hud-hover);
+  outline: none;
+}
+
+.agent-row-button:hover .status-glyph::before {
+  content: "▸";
+  color: var(--hud-text-strong);
+  font-size: 10px;
+}
+
+.agent-label {
+  color: var(--hud-text);
+}
+
+.project-label {
+  color: var(--hud-text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-glyph {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  position: relative;
+}
+
+.status-glyph::before {
+  content: "";
+}
+
+.status-working {
+  background: var(--status-working);
+  box-shadow: 0 0 6px rgba(90, 200, 250, 0.55);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.status-waiting {
+  background: transparent;
+  border: 1.5px solid var(--status-waiting);
+}
+
+.status-needs_attention {
+  background: var(--status-attention);
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-working {
+    animation: none;
+  }
+
+  .agent-row-button {
+    transition: none;
+  }
+}
