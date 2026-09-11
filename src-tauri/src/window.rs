@@ -25,7 +25,7 @@ mod macos {
     tauri_panel! {
         panel!(HudPanel {
             config: {
-                can_become_key_window: true,
+                can_become_key_window: false,
                 is_floating_panel: true
             }
         })
@@ -40,6 +40,7 @@ mod macos {
             .always_on_top(true)
             .visible_on_all_workspaces(true)
             .visible(false)
+            .focused(false)
             .skip_taskbar(true)
             .accept_first_mouse(true)
             .build()
@@ -70,6 +71,7 @@ mod macos {
                 );
                 panel.set_floating_panel(true);
                 panel.set_hides_on_deactivate(false);
+                panel.set_becomes_key_only_if_needed(true);
                 let _ = panel;
             }
             Err(err) => eprintln!("panel conversion failed: {err}"),
@@ -198,12 +200,12 @@ mod macos {
             ensure_on_screen(&window);
         }
 
+        // Never call window.show() — Tauri's show activates and steals Cursor's focus.
+        // Panel::show is orderFrontRegardless on a nonactivating NSPanel.
         if let Ok(panel) = app.get_webview_panel("main") {
-            panel.show();
-            panel.order_front_regardless();
-        } else if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.unminimize();
+            if !panel.is_visible() {
+                panel.show();
+            }
         }
     }
 }

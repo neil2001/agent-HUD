@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,6 +13,7 @@ use super::sqlite::{
 use super::{sort_agent_sessions, AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
 
 const TRANSCRIPT_FRESH_MS: i64 = 600_000;
+const TOOL_LIVE_MS: i64 = 30_000;
 
 pub fn cursor_support_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let home = dirs::home_dir()?;
@@ -89,6 +90,7 @@ fn collect_from_composer_headers(
     out: &mut HashMap<String, AgentSession>,
 ) {
     let headers = read_composer_headers(conn);
+    let live_tools = live_tool_composer_ids(conn, &headers, now_ms);
     for header in headers {
         if header.is_archived || header.is_subagent {
             continue;
@@ -128,7 +130,8 @@ fn collect_from_composer_headers(
             .and_then(|data| data.get("status"))
             .and_then(|v| v.as_str());
 
-        let generating = is_generating(composer_data.as_ref(), status_str);
+        let generating = is_generating(composer_data.as_ref(), status_str)
+            || live_tools.contains(&header.id);
 
         let continuation = composer_data
             .as_ref()
@@ -137,6 +140,7 @@ fn collect_from_composer_headers(
             .unwrap_or(false);
 
         let pending = needs_prompt(&header.value, composer_data.as_ref());
+        let unfinished = has_unfinished_run(&header.value, composer_data.as_ref());
 
         let (status, active) = map_composer_activity(
             status_str,
@@ -145,6 +149,7 @@ fn collect_from_composer_headers(
             generating,
             continuation,
             pending,
+            unfinished,
             now_ms,
         );
 
@@ -333,6 +338,7 @@ fn collect_from_workspace_fallback(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let pending = needs_prompt(&composer, None);
+            let unfinished = has_unfinished_run(&composer, None);
             let (status, active) = map_composer_activity(
                 status_str,
                 updated_at,
@@ -340,6 +346,7 @@ fn collect_from_workspace_fallback(
                 generating,
                 continuation,
                 pending,
+                unfinished,
                 now_ms,
             );
 
@@ -492,19 +499,24 @@ fn collect_transcript_dir(dir: &Path, now_ms: i64, out: &mut HashMap<String, i64
 }
 
 pub fn map_composer_activity(
-    _status: Option<&str>,
+    status: Option<&str>,
     _updated_at: i64,
     _transcript_ts: Option<i64>,
     generating: bool,
     continuation: bool,
     pending: bool,
+    unfinished: bool,
     _now_ms: i64,
 ) -> (AgentStatus, bool) {
     if pending {
         return (AgentStatus::NeedsAttention, true);
     }
 
-    if generating || continuation {
+    if matches!(status, Some("completed")) {
+        return (AgentStatus::Waiting, false);
+    }
+
+    if generating || continuation || unfinished {
         return (AgentStatus::Working, true);
     }
 
@@ -540,6 +552,120 @@ fn is_generating(composer_data: Option<&Value>, status: Option<&str>) -> bool {
         .and_then(|data| data.get("generatingBubbleIds"))
         .map(value_is_nonempty)
         .unwrap_or(false)
+}
+
+fn live_tool_composer_ids(conn: &Connection, headers: &[HeaderRow], now_ms: i64) -> HashSet<String> {
+    let mut live = HashSet::new();
+    let mut stmt = match conn.prepare(
+        "SELECT value FROM cursorDiskKV WHERE key LIKE ?1 AND (value LIKE '%\"status\":\"loading\"%' OR value LIKE '%\"status\":\"pending\"%' OR value LIKE '%\"status\":\"running\"%')",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return live,
+    };
+
+    for header in headers {
+        if header.is_archived || header.is_subagent {
+            continue;
+        }
+        let pattern = format!("bubbleId:{}:%", header.id);
+        let rows = match stmt.query_map([&pattern], |row| json_from_row(row.get_ref(0)?)) {
+            Ok(rows) => rows,
+            Err(_) => continue,
+        };
+        if rows
+            .filter_map(|row| row.ok())
+            .any(|bubble| bubble_is_live_tool(&bubble, now_ms))
+        {
+            live.insert(header.id.clone());
+        }
+    }
+
+    live
+}
+
+pub fn bubble_is_live_tool(bubble: &Value, now_ms: i64) -> bool {
+    if bubble.get("completedAtMs").and_then(|v| v.as_i64()).is_some() {
+        return false;
+    }
+
+    let status = bubble
+        .get("toolFormerData")
+        .and_then(|data| data.get("status"))
+        .and_then(|v| v.as_str());
+    if !matches!(status, Some("loading") | Some("pending") | Some("running")) {
+        return false;
+    }
+
+    let started = json_timestamp_ms(bubble.get("startedAtMs"))
+        .or_else(|| json_timestamp_ms(bubble.get("createdAt")));
+    match started {
+        Some(ts) => now_ms.saturating_sub(ts) <= TOOL_LIVE_MS,
+        None => false,
+    }
+}
+
+fn json_timestamp_ms(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(ms) = value.as_i64() {
+        return Some(ms);
+    }
+    if let Some(ms) = value.as_f64() {
+        return Some(ms as i64);
+    }
+    iso_to_ms(value.as_str()?)
+}
+
+fn iso_to_ms(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim().trim_end_matches('Z');
+    let (date, time) = trimmed.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    let (hms, frac) = match time.split_once('.') {
+        Some((hms, frac)) => (hms, frac),
+        None => (time, "0"),
+    };
+    let mut time_parts = hms.split(':');
+    let hour: u32 = time_parts.next()?.parse().ok()?;
+    let minute: u32 = time_parts.next()?.parse().ok()?;
+    let second: u32 = time_parts.next()?.parse().ok()?;
+    let millis: u32 = frac
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(3)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+
+    let days = days_from_civil(year, month, day)?;
+    Some(
+        days * 86_400_000
+            + hour as i64 * 3_600_000
+            + minute as i64 * 60_000
+            + second as i64 * 1_000
+            + millis as i64,
+    )
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 || day > 31 {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u32;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe as i64 * 365 + (yoe as i64 / 4) - (yoe as i64 / 100) + doy as i64;
+    Some((era as i64) * 146_097 + doe - 719_468)
+}
+
+fn has_unfinished_run(header: &Value, composer_data: Option<&Value>) -> bool {
+    json_timestamp_ms(header.get("unfinishedRunAt")).is_some()
+        || composer_data
+            .and_then(|data| json_timestamp_ms(data.get("unfinishedRunAt")))
+            .is_some()
 }
 
 fn needs_prompt(header: &Value, composer_data: Option<&Value>) -> bool {

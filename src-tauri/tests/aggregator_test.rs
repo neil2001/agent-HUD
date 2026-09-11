@@ -1,6 +1,8 @@
-use agent_hud_lib::sessions::cursor::{map_cloud_activity, map_composer_activity};
+use agent_hud_lib::sessions::cursor::{
+    bubble_is_live_tool, map_cloud_activity, map_composer_activity,
+};
 use agent_hud_lib::sessions::{AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
-use agent_hud_lib::state::AppState;
+use agent_hud_lib::state::{AppState, WORKING_HOLD_MS};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -106,6 +108,7 @@ fn completed_status_without_fresh_activity_is_inactive() {
         false,
         false,
         false,
+        false,
         now,
     );
     assert!(!active);
@@ -122,6 +125,7 @@ fn completed_status_with_fresh_header_is_inactive() {
         false,
         false,
         false,
+        false,
         now,
     );
     assert!(!active);
@@ -133,13 +137,134 @@ fn completed_status_with_fresh_transcript_is_inactive() {
     let (_, active) = map_composer_activity(
         Some("completed"),
         1_700_000_000_000,
-        Some(now),
+        Some(now - 30_000),
+        false,
         false,
         false,
         false,
         now,
     );
     assert!(!active);
+}
+
+#[test]
+fn recent_transcript_without_unfinished_is_inactive() {
+    let now = 1_700_000_010_000;
+    let (status, active) = map_composer_activity(
+        Some("aborted"),
+        now,
+        Some(now - 5_000),
+        false,
+        false,
+        false,
+        false,
+        now,
+    );
+    assert!(!active);
+    assert_eq!(status, AgentStatus::Waiting);
+}
+
+#[test]
+fn completed_status_overrides_unfinished() {
+    let now = 1_700_000_010_000;
+    let (status, active) = map_composer_activity(
+        Some("completed"),
+        now,
+        None,
+        false,
+        false,
+        false,
+        true,
+        now,
+    );
+    assert!(!active);
+    assert_eq!(status, AgentStatus::Waiting);
+}
+
+#[test]
+fn recent_loading_tool_bubble_is_live() {
+    let now = 1_700_000_010_000;
+    let bubble = serde_json::json!({
+        "toolFormerData": { "status": "loading", "name": "run_terminal_command_v2" },
+        "startedAtMs": now - 5_000
+    });
+    assert!(bubble_is_live_tool(&bubble, now));
+}
+
+#[test]
+fn completed_or_stale_loading_tool_bubble_is_not_live() {
+    let now = 1_700_000_010_000;
+    let completed = serde_json::json!({
+        "toolFormerData": { "status": "loading" },
+        "startedAtMs": now - 1_000,
+        "completedAtMs": now
+    });
+    assert!(!bubble_is_live_tool(&completed, now));
+
+    let stale = serde_json::json!({
+        "toolFormerData": { "status": "loading" },
+        "startedAtMs": now - 35_000
+    });
+    assert!(!bubble_is_live_tool(&stale, now));
+}
+
+#[test]
+fn aborted_with_unfinished_run_is_working() {
+    let now = 1_700_000_010_000;
+    let (status, active) = map_composer_activity(
+        Some("aborted"),
+        now - 190_000,
+        Some(now - 120_000),
+        false,
+        false,
+        false,
+        true,
+        now,
+    );
+    assert!(active);
+    assert_eq!(status, AgentStatus::Working);
+}
+
+#[test]
+fn completed_without_unfinished_run_is_inactive() {
+    let now = 1_700_000_010_000;
+    let (status, active) = map_composer_activity(
+        Some("completed"),
+        now,
+        None,
+        false,
+        false,
+        false,
+        false,
+        now,
+    );
+    assert!(!active);
+    assert_eq!(status, AgentStatus::Waiting);
+}
+
+#[test]
+fn acknowledge_completed_dismisses_but_working_stays() {
+    let state = AppState::new();
+    let t0 = 1_700_000_010_000;
+    state.merge_sessions_at(vec![sample_session("agent-1", AgentStatus::Working)], t0);
+
+    let sessions = state.acknowledge_session("agent-1");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].status, AgentStatus::Working);
+
+    state.merge_sessions_at(Vec::new(), t0 + WORKING_HOLD_MS + 1);
+    let sessions = state.acknowledge_session("agent-1");
+    assert!(sessions.is_empty());
+}
+
+#[test]
+fn acknowledge_needs_attention_stays_visible() {
+    let state = AppState::new();
+    state.merge_sessions(vec![sample_session("agent-1", AgentStatus::NeedsAttention)]);
+
+    let sessions = state.acknowledge_session("agent-1");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].status, AgentStatus::NeedsAttention);
 }
 
 #[test]
@@ -152,6 +277,7 @@ fn generating_agent_is_working() {
         true,
         false,
         false,
+        false,
         now,
     );
     assert!(active);
@@ -162,7 +288,7 @@ fn generating_agent_is_working() {
 fn pending_interaction_needs_attention() {
     let now = 1_700_000_010_000;
     let (status, active) =
-        map_composer_activity(Some("none"), now, None, false, false, true, now);
+        map_composer_activity(Some("none"), now, None, false, false, true, false, now);
     assert!(active);
     assert_eq!(status, AgentStatus::NeedsAttention);
 }
@@ -174,6 +300,7 @@ fn stale_none_status_is_inactive() {
         Some("none"),
         1_700_000_000_000,
         None,
+        false,
         false,
         false,
         false,
@@ -215,14 +342,31 @@ fn sample_session(id: &str, status: AgentStatus) -> AgentSession {
 }
 
 #[test]
-fn merge_keeps_recently_live_session_as_completed() {
+fn merge_holds_working_through_brief_idle_then_completes() {
     let state = AppState::new();
-    let live = vec![sample_session("agent-1", AgentStatus::Working)];
-    let merged = state.merge_sessions(live);
+    let t0 = 1_700_000_010_000;
+    let merged = state.merge_sessions_at(vec![sample_session("agent-1", AgentStatus::Working)], t0);
+    assert_eq!(merged[0].status, AgentStatus::Working);
+
+    let merged = state.merge_sessions_at(Vec::new(), t0 + 1_000);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].status, AgentStatus::Working);
 
-    let merged = state.merge_sessions(Vec::new());
+    let merged = state.merge_sessions_at(Vec::new(), t0 + WORKING_HOLD_MS + 1);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::Completed);
+}
+
+#[test]
+fn merge_keeps_recently_live_session_as_completed() {
+    let state = AppState::new();
+    let t0 = 1_700_000_010_000;
+    let live = vec![sample_session("agent-1", AgentStatus::Working)];
+    let merged = state.merge_sessions_at(live, t0);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::Working);
+
+    let merged = state.merge_sessions_at(Vec::new(), t0 + WORKING_HOLD_MS + 1);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].status, AgentStatus::Completed);
 }
@@ -230,18 +374,38 @@ fn merge_keeps_recently_live_session_as_completed() {
 #[test]
 fn dismiss_removes_completed_session_until_live_again() {
     let state = AppState::new();
-    state.merge_sessions(vec![sample_session("agent-1", AgentStatus::Working)]);
-    state.merge_sessions(Vec::new());
+    let t0 = 1_700_000_010_000;
+    state.merge_sessions_at(vec![sample_session("agent-1", AgentStatus::Working)], t0);
+    state.merge_sessions_at(Vec::new(), t0 + WORKING_HOLD_MS + 1);
 
     let dismissed = state.dismiss_session("agent-1");
     assert!(dismissed.is_empty());
 
-    let merged = state.merge_sessions(Vec::new());
+    let merged = state.merge_sessions_at(Vec::new(), t0 + WORKING_HOLD_MS + 2);
     assert!(merged.is_empty());
 
-    let merged = state.merge_sessions(vec![sample_session("agent-1", AgentStatus::NeedsAttention)]);
+    let merged = state.merge_sessions_at(
+        vec![sample_session("agent-1", AgentStatus::NeedsAttention)],
+        t0 + WORKING_HOLD_MS + 3,
+    );
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].status, AgentStatus::NeedsAttention);
+}
+
+#[test]
+fn dismiss_awaiting_stays_hidden_until_status_changes() {
+    let state = AppState::new();
+    state.merge_sessions(vec![sample_session("agent-1", AgentStatus::NeedsAttention)]);
+
+    let dismissed = state.dismiss_session("agent-1");
+    assert!(dismissed.is_empty());
+
+    let merged = state.merge_sessions(vec![sample_session("agent-1", AgentStatus::NeedsAttention)]);
+    assert!(merged.is_empty());
+
+    let merged = state.merge_sessions(vec![sample_session("agent-1", AgentStatus::Working)]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::Working);
 }
 
 #[test]

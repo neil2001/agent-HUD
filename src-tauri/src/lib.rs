@@ -23,7 +23,7 @@ fn focus_session(
     id: String,
 ) -> Result<(), String> {
     focus::focus_session(state.inner(), &id)?;
-    let sessions = state.inner().dismiss_session(&id);
+    let sessions = state.inner().acknowledge_session(&id);
     aggregator::apply_sessions(&app, state.inner(), sessions);
     Ok(())
 }

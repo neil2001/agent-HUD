@@ -11,7 +11,7 @@
   --hud-hover: rgba(255, 255, 255, 0.08);
   --status-working: #5ac8fa;
   --status-waiting: rgba(255, 255, 255, 0.45);
-  --status-attention: #ffcc00;
+  --status-attention: #ff9f0a;
   --status-completed: #30d158;
   --hud-radius: 12px;
 }
