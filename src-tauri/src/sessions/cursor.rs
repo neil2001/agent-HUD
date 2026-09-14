@@ -14,11 +14,23 @@ use super::{sort_agent_sessions, AgentKind, AgentSession, AgentStatus, ProjectIn
 
 const TRANSCRIPT_FRESH_MS: i64 = 600_000;
 const TOOL_LIVE_MS: i64 = 30_000;
+/// Running tools (e.g. long shell commands) may not refresh timestamps for minutes.
+const TOOL_RUNNING_LIVE_MS: i64 = 1_800_000;
+/// Limits HUD rows to current open waits; leftover unfinished timestamps do not resurrect old chats.
+pub const UNFINISHED_PROMPT_RECENCY_MS: i64 = 45 * 60 * 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastTurnKind {
+    User,
+    Tool,
+    Thinking,
+    AssistantText,
+    Unknown,
+}
 
 pub fn cursor_support_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let home = dirs::home_dir()?;
-    let global_db = home
-        .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    let global_db = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
     let workspace_root = home.join("Library/Application Support/Cursor/User/workspaceStorage");
     let transcripts_root = home.join(".cursor/projects");
     Some((global_db, workspace_root, transcripts_root))
@@ -71,7 +83,7 @@ pub fn discover_active_sessions() -> Vec<AgentSession> {
     let mut sessions = HashMap::new();
 
     collect_from_composer_headers(&conn, now_ms, &transcript_activity, &mut sessions);
-    collect_from_cloud_agents(&conn, now_ms, &mut sessions);
+    collect_from_cloud_agents(&conn, &mut sessions);
     collect_from_workspace_fallback(&workspace_root, now_ms, &transcript_activity, &mut sessions);
 
     let mut active: Vec<AgentSession> = sessions
@@ -90,25 +102,24 @@ fn collect_from_composer_headers(
     out: &mut HashMap<String, AgentSession>,
 ) {
     let headers = read_composer_headers(conn);
-    let live_tools = live_tool_composer_ids(conn, &headers, now_ms);
+    let composer_data_by_id = read_composer_data_map(conn, &headers);
+    let live_tools = live_tool_composer_ids(conn, &headers, &composer_data_by_id, now_ms);
     for header in headers {
         if header.is_archived || header.is_subagent {
             continue;
         }
 
-        let composer_data = read_disk_kv_json(conn, &format!("composerData:{}", header.id))
-            .ok()
-            .flatten();
+        let composer_data = composer_data_by_id.get(&header.id);
 
-        if is_draft(&header.value, composer_data.as_ref()) {
+        if is_draft(&header.value, composer_data) {
             continue;
         }
 
-        if !is_agent_session(&header.value, composer_data.as_ref()) {
+        if !is_agent_session(&header.value, composer_data) {
             continue;
         }
 
-        let data_updated = composer_data.as_ref().and_then(|data| {
+        let data_updated = composer_data.and_then(|data| {
             data.get("lastUpdatedAt")
                 .or_else(|| data.get("updatedAt"))
                 .and_then(|v| v.as_i64())
@@ -125,45 +136,20 @@ fn collect_from_composer_headers(
         .unwrap_or(0);
 
         let transcript_ts = transcript_activity.get(&header.id).copied();
-        let status_str = composer_data
-            .as_ref()
-            .and_then(|data| data.get("status"))
-            .and_then(|v| v.as_str());
-
-        let generating = is_generating(composer_data.as_ref(), status_str)
-            || live_tools.contains(&header.id);
-
-        let continuation = composer_data
-            .as_ref()
-            .and_then(|data| data.get("isContinuationInProgress"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let pending = needs_prompt(&header.value, composer_data.as_ref());
-        let unfinished = has_unfinished_run(&header.value, composer_data.as_ref());
-
-        let (status, active) = map_composer_activity(
-            status_str,
+        let Some(status) = composer_session_status(
+            composer_data,
+            &header.value,
             updated_at,
             transcript_ts,
-            generating,
-            continuation,
-            pending,
-            unfinished,
+            live_tools.contains(&header.id),
             now_ms,
-        );
-
-        if !active {
+        ) else {
             continue;
-        }
+        };
 
         let workspace_path = workspace_path_from_value(&header.value);
         let project_name = project_basename(&workspace_path);
-        let title = session_title_from_value(
-            &header.value,
-            composer_data.as_ref(),
-            &project_name,
-        );
+        let title = session_title_from_value(&header.value, composer_data, &project_name);
 
         out.insert(
             header.id.clone(),
@@ -177,8 +163,12 @@ fn collect_from_composer_headers(
                 },
                 status,
                 host: match workspace_path {
-                    Some(path) => SessionHost::CursorDesktop { workspace_path: path },
-                    None => SessionHost::CursorCloud { workspace_path: None },
+                    Some(path) => SessionHost::CursorDesktop {
+                        workspace_path: path,
+                    },
+                    None => SessionHost::CursorCloud {
+                        workspace_path: None,
+                    },
                 },
                 updated_at,
             },
@@ -186,7 +176,7 @@ fn collect_from_composer_headers(
     }
 }
 
-fn collect_from_cloud_agents(conn: &Connection, now_ms: i64, out: &mut HashMap<String, AgentSession>) {
+fn collect_from_cloud_agents(conn: &Connection, out: &mut HashMap<String, AgentSession>) {
     let keys = cloud_agent_keys(conn);
     for key in keys {
         let Some(agents) = read_item_json(conn, &key).ok().flatten() else {
@@ -209,7 +199,11 @@ fn collect_from_cloud_agents(conn: &Connection, now_ms: i64, out: &mut HashMap<S
                 continue;
             }
 
-            if agent.get("isKilled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if agent
+                .get("isKilled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -227,18 +221,9 @@ fn collect_from_cloud_agents(conn: &Connection, now_ms: i64, out: &mut HashMap<S
 
             let status_code = agent.get("status").and_then(|v| v.as_i64());
             let workflow = agent.get("workflowStatus").and_then(|v| v.as_i64());
-
-            let (status, active) = map_cloud_activity(
-                status_code,
-                workflow,
-                updated_at,
-                pending,
-                now_ms,
-            );
-
-            if !active {
+            let Some(status) = classify_cloud(status_code, workflow, pending) else {
                 continue;
-            }
+            };
 
             let workspace_path = agent
                 .get("workspaceRootPath")
@@ -316,7 +301,11 @@ fn collect_from_workspace_fallback(
                 continue;
             }
 
-            if composer.get("isArchived").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if composer
+                .get("isArchived")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -331,28 +320,16 @@ fn collect_from_workspace_fallback(
                 .unwrap_or(0);
 
             let transcript_ts = transcript_activity.get(id).copied();
-            let status_str = composer.get("status").and_then(|v| v.as_str());
-            let generating = is_generating(Some(&composer), status_str);
-            let continuation = composer
-                .get("isContinuationInProgress")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let pending = needs_prompt(&composer, None);
-            let unfinished = has_unfinished_run(&composer, None);
-            let (status, active) = map_composer_activity(
-                status_str,
+            let Some(status) = composer_session_status(
+                Some(&composer),
+                &composer,
                 updated_at,
                 transcript_ts,
-                generating,
-                continuation,
-                pending,
-                unfinished,
+                false,
                 now_ms,
-            );
-
-            if !active {
+            ) else {
                 continue;
-            }
+            };
 
             let project_name = project_basename(&workspace_path);
             let title = session_title_from_value(&composer, None, &project_name);
@@ -368,8 +345,12 @@ fn collect_from_workspace_fallback(
                     },
                     status,
                     host: match workspace_path.clone() {
-                        Some(path) => SessionHost::CursorDesktop { workspace_path: path },
-                        None => SessionHost::CursorCloud { workspace_path: None },
+                        Some(path) => SessionHost::CursorDesktop {
+                            workspace_path: path,
+                        },
+                        None => SessionHost::CursorCloud {
+                            workspace_path: None,
+                        },
                     },
                     updated_at,
                 },
@@ -416,9 +397,9 @@ fn read_composer_headers(conn: &Connection) -> Vec<HeaderRow> {
 }
 
 fn cloud_agent_keys(conn: &Connection) -> Vec<String> {
-    let mut stmt = match conn.prepare(
-        "SELECT key FROM ItemTable WHERE key LIKE 'cloudAgentRepository.agents%'",
-    ) {
+    let mut stmt = match conn
+        .prepare("SELECT key FROM ItemTable WHERE key LIKE 'cloudAgentRepository.agents%'")
+    {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
     };
@@ -498,49 +479,88 @@ fn collect_transcript_dir(dir: &Path, now_ms: i64, out: &mut HashMap<String, i64
     }
 }
 
-pub fn map_composer_activity(
-    status: Option<&str>,
-    _updated_at: i64,
-    _transcript_ts: Option<i64>,
-    generating: bool,
-    continuation: bool,
-    pending: bool,
-    unfinished: bool,
-    _now_ms: i64,
-) -> (AgentStatus, bool) {
-    if pending {
-        return (AgentStatus::NeedsAttention, true);
+pub fn classify(live_work: bool, awaiting_user: bool) -> Option<AgentStatus> {
+    if live_work {
+        Some(AgentStatus::Working)
+    } else if awaiting_user {
+        Some(AgentStatus::NeedsAttention)
+    } else {
+        None
     }
-
-    if matches!(status, Some("completed")) {
-        return (AgentStatus::Waiting, false);
-    }
-
-    if generating || continuation || unfinished {
-        return (AgentStatus::Working, true);
-    }
-
-    (AgentStatus::Waiting, false)
 }
 
-pub fn map_cloud_activity(
+pub fn classify_cloud(
     status: Option<i64>,
     workflow: Option<i64>,
-    _updated_at: i64,
     pending: bool,
-    _now_ms: i64,
-) -> (AgentStatus, bool) {
+) -> Option<AgentStatus> {
     let running = matches!(status, Some(1)) || matches!(workflow, Some(1));
+    classify(running, pending)
+}
 
-    if pending {
-        return (AgentStatus::NeedsAttention, true);
+pub fn composer_session_status(
+    composer_data: Option<&Value>,
+    header: &Value,
+    updated_at: i64,
+    transcript_ts: Option<i64>,
+    has_live_tool: bool,
+    now_ms: i64,
+) -> Option<AgentStatus> {
+    let status_str = composer_data
+        .and_then(|data| data.get("status"))
+        .and_then(|v| v.as_str())
+        .or_else(|| header.get("status").and_then(|v| v.as_str()));
+    let continuation = composer_data
+        .and_then(|data| data.get("isContinuationInProgress"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| {
+            header
+                .get("isContinuationInProgress")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
+    let last_turn = last_turn_kind(composer_data.or(Some(header)));
+    let recent_unfinished =
+        is_recent_unfinished(header, composer_data, updated_at, transcript_ts, now_ms);
+    let open_run_working = recent_unfinished
+        && matches!(
+            last_turn,
+            LastTurnKind::Tool
+                | LastTurnKind::Thinking
+                | LastTurnKind::User
+                | LastTurnKind::Unknown
+        );
+    let live_work = is_generating(composer_data.or(Some(header)), status_str)
+        || has_live_tool
+        || continuation
+        || open_run_working;
+    let awaiting_user = needs_prompt(header, composer_data)
+        || is_waiting_on_user(
+            status_str,
+            header,
+            composer_data,
+            updated_at,
+            transcript_ts,
+            last_turn,
+            now_ms,
+        );
+    classify(live_work, awaiting_user)
+}
+
+fn read_composer_data_map(conn: &Connection, headers: &[HeaderRow]) -> HashMap<String, Value> {
+    let mut map = HashMap::new();
+    for header in headers {
+        if header.is_archived || header.is_subagent {
+            continue;
+        }
+        if let Some(data) = read_disk_kv_json(conn, &format!("composerData:{}", header.id))
+            .ok()
+            .flatten()
+        {
+            map.insert(header.id.clone(), data);
+        }
     }
-
-    if running {
-        return (AgentStatus::Working, true);
-    }
-
-    (AgentStatus::Waiting, false)
+    map
 }
 
 fn is_generating(composer_data: Option<&Value>, status: Option<&str>) -> bool {
@@ -554,7 +574,12 @@ fn is_generating(composer_data: Option<&Value>, status: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-fn live_tool_composer_ids(conn: &Connection, headers: &[HeaderRow], now_ms: i64) -> HashSet<String> {
+fn live_tool_composer_ids(
+    conn: &Connection,
+    headers: &[HeaderRow],
+    composer_data_by_id: &HashMap<String, Value>,
+    now_ms: i64,
+) -> HashSet<String> {
     let mut live = HashSet::new();
     let mut stmt = match conn.prepare(
         "SELECT value FROM cursorDiskKV WHERE key LIKE ?1 AND (value LIKE '%\"status\":\"loading\"%' OR value LIKE '%\"status\":\"pending\"%' OR value LIKE '%\"status\":\"running\"%')",
@@ -567,6 +592,10 @@ fn live_tool_composer_ids(conn: &Connection, headers: &[HeaderRow], now_ms: i64)
         if header.is_archived || header.is_subagent {
             continue;
         }
+        let composer_status = composer_data_by_id
+            .get(&header.id)
+            .and_then(|data| data.get("status"))
+            .and_then(|v| v.as_str());
         let pattern = format!("bubbleId:{}:%", header.id);
         let rows = match stmt.query_map([&pattern], |row| json_from_row(row.get_ref(0)?)) {
             Ok(rows) => rows,
@@ -574,7 +603,7 @@ fn live_tool_composer_ids(conn: &Connection, headers: &[HeaderRow], now_ms: i64)
         };
         if rows
             .filter_map(|row| row.ok())
-            .any(|bubble| bubble_is_live_tool(&bubble, now_ms))
+            .any(|bubble| bubble_is_live_tool(&bubble, now_ms, composer_status))
         {
             live.insert(header.id.clone());
         }
@@ -583,8 +612,12 @@ fn live_tool_composer_ids(conn: &Connection, headers: &[HeaderRow], now_ms: i64)
     live
 }
 
-pub fn bubble_is_live_tool(bubble: &Value, now_ms: i64) -> bool {
-    if bubble.get("completedAtMs").and_then(|v| v.as_i64()).is_some() {
+pub fn bubble_is_live_tool(bubble: &Value, now_ms: i64, composer_status: Option<&str>) -> bool {
+    if bubble
+        .get("completedAtMs")
+        .and_then(|v| v.as_i64())
+        .is_some()
+    {
         return false;
     }
 
@@ -596,10 +629,21 @@ pub fn bubble_is_live_tool(bubble: &Value, now_ms: i64) -> bool {
         return false;
     }
 
+    if matches!(status, Some("loading") | Some("pending"))
+        && matches!(composer_status, Some("completed"))
+    {
+        return false;
+    }
+
     let started = json_timestamp_ms(bubble.get("startedAtMs"))
         .or_else(|| json_timestamp_ms(bubble.get("createdAt")));
+    let max_age = if matches!(status, Some("running")) {
+        TOOL_RUNNING_LIVE_MS
+    } else {
+        TOOL_LIVE_MS
+    };
     match started {
-        Some(ts) => now_ms.saturating_sub(ts) <= TOOL_LIVE_MS,
+        Some(ts) => now_ms.saturating_sub(ts) <= max_age,
         None => false,
     }
 }
@@ -661,22 +705,105 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     Some((era as i64) * 146_097 + doe - 719_468)
 }
 
-fn has_unfinished_run(header: &Value, composer_data: Option<&Value>) -> bool {
-    json_timestamp_ms(header.get("unfinishedRunAt")).is_some()
-        || composer_data
-            .and_then(|data| json_timestamp_ms(data.get("unfinishedRunAt")))
-            .is_some()
+fn unfinished_run_at_ms(header: &Value, composer_data: Option<&Value>) -> Option<i64> {
+    json_timestamp_ms(header.get("unfinishedRunAt"))
+        .or_else(|| composer_data.and_then(|data| json_timestamp_ms(data.get("unfinishedRunAt"))))
+}
+
+fn is_recent_unfinished(
+    header: &Value,
+    composer_data: Option<&Value>,
+    updated_at: i64,
+    transcript_ts: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    let Some(unfinished_at) = unfinished_run_at_ms(header, composer_data) else {
+        return false;
+    };
+    let activity = updated_at
+        .max(unfinished_at)
+        .max(transcript_ts.unwrap_or(0));
+    activity > 0 && now_ms.saturating_sub(activity) <= UNFINISHED_PROMPT_RECENCY_MS
+}
+
+pub fn is_waiting_on_user(
+    status: Option<&str>,
+    header: &Value,
+    composer_data: Option<&Value>,
+    updated_at: i64,
+    transcript_ts: Option<i64>,
+    last_turn: LastTurnKind,
+    now_ms: i64,
+) -> bool {
+    if !matches!(status, Some("aborted") | Some("none")) {
+        return false;
+    }
+    if last_turn != LastTurnKind::AssistantText {
+        return false;
+    }
+    is_recent_unfinished(header, composer_data, updated_at, transcript_ts, now_ms)
+}
+
+pub fn last_turn_kind(composer_data: Option<&Value>) -> LastTurnKind {
+    let Some(headers) = composer_data
+        .and_then(|data| data.get("fullConversationHeadersOnly"))
+        .and_then(|v| v.as_array())
+    else {
+        return LastTurnKind::Unknown;
+    };
+
+    for entry in headers.iter().rev() {
+        let kind = last_turn_from_header(entry);
+        if kind != LastTurnKind::Unknown {
+            return kind;
+        }
+    }
+    LastTurnKind::Unknown
+}
+
+fn last_turn_from_header(entry: &Value) -> LastTurnKind {
+    if entry.get("type").and_then(|v| v.as_i64()) == Some(1) {
+        return LastTurnKind::User;
+    }
+
+    let grouping = entry.get("grouping");
+    let capability = grouping
+        .and_then(|g| g.get("capabilityType"))
+        .and_then(|v| v.as_i64());
+    let tool_status = grouping
+        .and_then(|g| g.get("toolFormerStatus"))
+        .and_then(|v| v.as_str());
+    if capability == Some(15) || tool_status.is_some() || entry.get("toolFormerData").is_some() {
+        return LastTurnKind::Tool;
+    }
+
+    let thinking = grouping
+        .and_then(|g| g.get("hasThinking"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if thinking {
+        return LastTurnKind::Thinking;
+    }
+
+    let has_text = grouping
+        .and_then(|g| g.get("hasText"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let preview = grouping
+        .and_then(|g| g.get("textPreview"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if has_text || !preview.is_empty() {
+        return LastTurnKind::AssistantText;
+    }
+
+    LastTurnKind::Unknown
 }
 
 fn needs_prompt(header: &Value, composer_data: Option<&Value>) -> bool {
     json_flag(header, "hasBlockingPendingActions")
-        || json_flag(header, "hasPendingPlan")
         || composer_data
-            .map(|data| {
-                json_flag(data, "hasBlockingPendingActions")
-                    || json_flag(data, "hasPendingPlan")
-                    || json_flag(data, "pendingCreateWorktree")
-            })
+            .map(|data| json_flag(data, "hasBlockingPendingActions"))
             .unwrap_or(false)
 }
 
@@ -753,7 +880,9 @@ fn session_title_from_value(
     let candidates = [
         value.get("name").and_then(|v| v.as_str()),
         value.get("subtitle").and_then(|v| v.as_str()),
-        composer_data.and_then(|data| data.get("name")).and_then(|v| v.as_str()),
+        composer_data
+            .and_then(|data| data.get("name"))
+            .and_then(|v| v.as_str()),
         composer_data
             .and_then(|data| data.get("subtitle"))
             .and_then(|v| v.as_str()),

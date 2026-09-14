@@ -1,5 +1,6 @@
 use agent_hud_lib::sessions::cursor::{
-    bubble_is_live_tool, map_cloud_activity, map_composer_activity,
+    bubble_is_live_tool, classify, classify_cloud, composer_session_status, is_waiting_on_user,
+    last_turn_kind, LastTurnKind, UNFINISHED_PROMPT_RECENCY_MS,
 };
 use agent_hud_lib::sessions::{AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
 use agent_hud_lib::state::{AppState, WORKING_HOLD_MS};
@@ -63,6 +64,65 @@ fn create_fixture_db(path: &std::path::Path) {
     .expect("insert composer data");
 }
 
+fn sample_session(id: &str, status: AgentStatus) -> AgentSession {
+    AgentSession {
+        id: id.to_string(),
+        agent: AgentKind::Cursor,
+        title: "Test session".to_string(),
+        project: ProjectInfo {
+            name: "agent-HUD".to_string(),
+            path: Some("/Users/test/Projects/agent-HUD".to_string()),
+        },
+        status,
+        host: SessionHost::CursorDesktop {
+            workspace_path: "/Users/test/Projects/agent-HUD".to_string(),
+        },
+        updated_at: 1_700_000_010_000,
+    }
+}
+
+fn last_header(kind: LastTurnKind) -> serde_json::Value {
+    match kind {
+        LastTurnKind::User => serde_json::json!({ "type": 1 }),
+        LastTurnKind::Tool => serde_json::json!({
+            "type": 2,
+            "grouping": { "capabilityType": 15, "toolFormerStatus": "completed" }
+        }),
+        LastTurnKind::Thinking => serde_json::json!({
+            "type": 2,
+            "grouping": { "hasThinking": true }
+        }),
+        LastTurnKind::AssistantText => serde_json::json!({
+            "type": 2,
+            "grouping": { "hasText": true, "textPreview": "Need your input" }
+        }),
+        LastTurnKind::Unknown => serde_json::json!({ "type": 2, "grouping": {} }),
+    }
+}
+
+fn composer(
+    status: &str,
+    unfinished: Option<i64>,
+    last: Option<LastTurnKind>,
+    extra: serde_json::Value,
+) -> (serde_json::Value, serde_json::Value) {
+    let mut data = extra;
+    if let serde_json::Value::Object(map) = &mut data {
+        map.insert("status".into(), serde_json::json!(status));
+        if let Some(kind) = last {
+            map.insert(
+                "fullConversationHeadersOnly".into(),
+                serde_json::json!([last_header(kind)]),
+            );
+        }
+    }
+    let header = match unfinished {
+        Some(ts) => serde_json::json!({ "unfinishedRunAt": ts }),
+        None => serde_json::json!({}),
+    };
+    (data, header)
+}
+
 #[test]
 fn live_cursor_process_is_detected_on_this_machine() {
     assert!(
@@ -99,86 +159,218 @@ fn fixture_db_has_expected_tables() {
 }
 
 #[test]
-fn completed_status_without_fresh_activity_is_inactive() {
-    let now = 1_700_000_600_001;
-    let (status, active) = map_composer_activity(
+fn classify_live_work_wins() {
+    assert_eq!(classify(true, false), Some(AgentStatus::Working));
+    assert_eq!(classify(true, true), Some(AgentStatus::Working));
+    assert_eq!(classify(false, true), Some(AgentStatus::NeedsAttention));
+    assert_eq!(classify(false, false), None);
+}
+
+#[test]
+fn generating_agent_is_working() {
+    let now = 1_700_000_010_000;
+    let data = serde_json::json!({ "status": "generating" });
+    let header = serde_json::json!({});
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn live_tool_marks_session_working() {
+    let now = 1_700_000_010_000;
+    let data = serde_json::json!({ "status": "none" });
+    let header = serde_json::json!({});
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, true, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn last_turn_tool_with_unfinished_is_working() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "aborted",
+        Some(now - 60_000),
+        Some(LastTurnKind::Tool),
+        serde_json::json!({}),
+    );
+    assert_eq!(last_turn_kind(Some(&data)), LastTurnKind::Tool);
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn last_turn_user_with_unfinished_is_working() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "aborted",
+        Some(now - 1_000),
+        Some(LastTurnKind::User),
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn last_assistant_text_with_unfinished_needs_attention() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "aborted",
+        Some(now - 60_000),
+        Some(LastTurnKind::AssistantText),
+        serde_json::json!({}),
+    );
+    assert_eq!(last_turn_kind(Some(&data)), LastTurnKind::AssistantText);
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::NeedsAttention)
+    );
+}
+
+#[test]
+fn pending_does_not_beat_generating() {
+    let now = 1_700_000_010_000;
+    let data = serde_json::json!({
+        "status": "generating",
+        "hasBlockingPendingActions": true
+    });
+    let header = serde_json::json!({ "hasBlockingPendingActions": true });
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn blocking_pending_is_awaiting_user() {
+    let now = 1_700_000_010_000;
+    let data = serde_json::json!({
+        "status": "none",
+        "hasBlockingPendingActions": true
+    });
+    let header = serde_json::json!({});
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::NeedsAttention)
+    );
+}
+
+#[test]
+fn generating_beats_unfinished_assistant_text() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "generating",
+        Some(now),
+        Some(LastTurnKind::AssistantText),
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn completed_with_unfinished_and_last_tool_is_working() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "completed",
+        Some(now),
+        Some(LastTurnKind::Tool),
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn completed_without_live_work_is_hidden() {
+    let now = 1_700_000_010_000;
+    let data = serde_json::json!({ "status": "completed" });
+    let header = serde_json::json!({});
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        None
+    );
+}
+
+#[test]
+fn completed_with_assistant_text_is_not_waiting() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "completed",
+        Some(now),
+        Some(LastTurnKind::AssistantText),
+        serde_json::json!({}),
+    );
+    assert!(!is_waiting_on_user(
         Some("completed"),
-        1_700_000_000_000,
+        &header,
+        Some(&data),
+        now,
         None,
-        false,
-        false,
-        false,
-        false,
+        LastTurnKind::AssistantText,
         now,
+    ));
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        None
     );
-    assert!(!active);
-    assert_eq!(status, AgentStatus::Waiting);
 }
 
 #[test]
-fn completed_status_with_fresh_header_is_inactive() {
+fn stale_unfinished_aborted_is_inactive() {
     let now = 1_700_000_010_000;
-    let (_, active) = map_composer_activity(
-        Some("completed"),
-        now,
-        None,
-        false,
-        false,
-        false,
-        false,
-        now,
+    let stale = now - UNFINISHED_PROMPT_RECENCY_MS - 1;
+    let (data, header) = composer(
+        "aborted",
+        Some(stale),
+        Some(LastTurnKind::AssistantText),
+        serde_json::json!({}),
     );
-    assert!(!active);
+    assert_eq!(
+        composer_session_status(Some(&data), &header, stale, None, false, now),
+        None
+    );
 }
 
 #[test]
-fn completed_status_with_fresh_transcript_is_inactive() {
+fn idle_none_status_is_hidden() {
     let now = 1_700_000_010_000;
-    let (_, active) = map_composer_activity(
-        Some("completed"),
-        1_700_000_000_000,
-        Some(now - 30_000),
-        false,
-        false,
-        false,
-        false,
-        now,
+    let data = serde_json::json!({ "status": "none" });
+    let header = serde_json::json!({});
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, Some(now), false, now),
+        None
     );
-    assert!(!active);
 }
 
 #[test]
-fn recent_transcript_without_unfinished_is_inactive() {
-    let now = 1_700_000_010_000;
-    let (status, active) = map_composer_activity(
-        Some("aborted"),
-        now,
-        Some(now - 5_000),
-        false,
-        false,
-        false,
-        false,
-        now,
-    );
-    assert!(!active);
-    assert_eq!(status, AgentStatus::Waiting);
-}
+fn last_turn_kind_reads_conversation_headers() {
+    let tool = serde_json::json!({
+        "fullConversationHeadersOnly": [last_header(LastTurnKind::Tool)]
+    });
+    assert_eq!(last_turn_kind(Some(&tool)), LastTurnKind::Tool);
 
-#[test]
-fn completed_status_overrides_unfinished() {
-    let now = 1_700_000_010_000;
-    let (status, active) = map_composer_activity(
-        Some("completed"),
-        now,
-        None,
-        false,
-        false,
-        false,
-        true,
-        now,
-    );
-    assert!(!active);
-    assert_eq!(status, AgentStatus::Waiting);
+    let text = serde_json::json!({
+        "fullConversationHeadersOnly": [last_header(LastTurnKind::AssistantText)]
+    });
+    assert_eq!(last_turn_kind(Some(&text)), LastTurnKind::AssistantText);
+
+    let thinking = serde_json::json!({
+        "fullConversationHeadersOnly": [last_header(LastTurnKind::Thinking)]
+    });
+    assert_eq!(last_turn_kind(Some(&thinking)), LastTurnKind::Thinking);
 }
 
 #[test]
@@ -188,7 +380,17 @@ fn recent_loading_tool_bubble_is_live() {
         "toolFormerData": { "status": "loading", "name": "run_terminal_command_v2" },
         "startedAtMs": now - 5_000
     });
-    assert!(bubble_is_live_tool(&bubble, now));
+    assert!(bubble_is_live_tool(&bubble, now, Some("generating")));
+}
+
+#[test]
+fn long_running_tool_bubble_stays_live() {
+    let now = 1_700_000_010_000;
+    let bubble = serde_json::json!({
+        "toolFormerData": { "status": "running", "name": "run_terminal_command_v2" },
+        "startedAtMs": now - 120_000
+    });
+    assert!(bubble_is_live_tool(&bubble, now, Some("generating")));
 }
 
 #[test]
@@ -199,47 +401,54 @@ fn completed_or_stale_loading_tool_bubble_is_not_live() {
         "startedAtMs": now - 1_000,
         "completedAtMs": now
     });
-    assert!(!bubble_is_live_tool(&completed, now));
+    assert!(!bubble_is_live_tool(&completed, now, None));
 
     let stale = serde_json::json!({
         "toolFormerData": { "status": "loading" },
         "startedAtMs": now - 35_000
     });
-    assert!(!bubble_is_live_tool(&stale, now));
+    assert!(!bubble_is_live_tool(&stale, now, Some("generating")));
 }
 
 #[test]
-fn aborted_with_unfinished_run_is_working() {
+fn loading_tool_ignored_when_composer_completed() {
     let now = 1_700_000_010_000;
-    let (status, active) = map_composer_activity(
-        Some("aborted"),
-        now - 190_000,
-        Some(now - 120_000),
-        false,
-        false,
-        false,
-        true,
-        now,
-    );
-    assert!(active);
-    assert_eq!(status, AgentStatus::Working);
+    let bubble = serde_json::json!({
+        "toolFormerData": { "status": "loading", "name": "read_file_v2" },
+        "startedAtMs": now - 5_000
+    });
+    assert!(bubble_is_live_tool(&bubble, now, Some("aborted")));
+    assert!(bubble_is_live_tool(&bubble, now, Some("generating")));
+    assert!(!bubble_is_live_tool(&bubble, now, Some("completed")));
 }
 
 #[test]
-fn completed_without_unfinished_run_is_inactive() {
-    let now = 1_700_000_010_000;
-    let (status, active) = map_composer_activity(
-        Some("completed"),
-        now,
-        None,
-        false,
-        false,
-        false,
-        false,
-        now,
+fn cloud_idle_is_hidden() {
+    assert_eq!(classify_cloud(Some(0), Some(0), false), None);
+}
+
+#[test]
+fn cloud_running_is_working() {
+    assert_eq!(
+        classify_cloud(Some(1), Some(1), false),
+        Some(AgentStatus::Working)
     );
-    assert!(!active);
-    assert_eq!(status, AgentStatus::Waiting);
+}
+
+#[test]
+fn cloud_pending_is_awaiting_user() {
+    assert_eq!(
+        classify_cloud(Some(0), Some(0), true),
+        Some(AgentStatus::NeedsAttention)
+    );
+}
+
+#[test]
+fn cloud_running_beats_pending() {
+    assert_eq!(
+        classify_cloud(Some(1), Some(1), true),
+        Some(AgentStatus::Working)
+    );
 }
 
 #[test]
@@ -265,80 +474,6 @@ fn acknowledge_needs_attention_stays_visible() {
     let sessions = state.acknowledge_session("agent-1");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].status, AgentStatus::NeedsAttention);
-}
-
-#[test]
-fn generating_agent_is_working() {
-    let now = 1_700_000_010_000;
-    let (status, active) = map_composer_activity(
-        Some("none"),
-        now,
-        Some(now),
-        true,
-        false,
-        false,
-        false,
-        now,
-    );
-    assert!(active);
-    assert_eq!(status, AgentStatus::Working);
-}
-
-#[test]
-fn pending_interaction_needs_attention() {
-    let now = 1_700_000_010_000;
-    let (status, active) =
-        map_composer_activity(Some("none"), now, None, false, false, true, false, now);
-    assert!(active);
-    assert_eq!(status, AgentStatus::NeedsAttention);
-}
-
-#[test]
-fn stale_none_status_is_inactive() {
-    let now = 1_700_000_600_001;
-    let (_, active) = map_composer_activity(
-        Some("none"),
-        1_700_000_000_000,
-        None,
-        false,
-        false,
-        false,
-        false,
-        now,
-    );
-    assert!(!active);
-}
-
-#[test]
-fn cloud_idle_even_if_recent_is_inactive() {
-    let now = 1_700_000_010_000;
-    let (_, active) = map_cloud_activity(Some(0), Some(0), now, false, now);
-    assert!(!active);
-}
-
-#[test]
-fn cloud_running_status_is_active() {
-    let now = 1_700_000_010_000;
-    let (status, active) = map_cloud_activity(Some(1), Some(1), now, false, now);
-    assert!(active);
-    assert_eq!(status, AgentStatus::Working);
-}
-
-fn sample_session(id: &str, status: AgentStatus) -> AgentSession {
-    AgentSession {
-        id: id.to_string(),
-        agent: AgentKind::Cursor,
-        title: "Test session".to_string(),
-        project: ProjectInfo {
-            name: "agent-HUD".to_string(),
-            path: Some("/Users/test/Projects/agent-HUD".to_string()),
-        },
-        status,
-        host: SessionHost::CursorDesktop {
-            workspace_path: "/Users/test/Projects/agent-HUD".to_string(),
-        },
-        updated_at: 1_700_000_010_000,
-    }
 }
 
 #[test]
@@ -369,6 +504,27 @@ fn merge_keeps_recently_live_session_as_completed() {
     let merged = state.merge_sessions_at(Vec::new(), t0 + WORKING_HOLD_MS + 1);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].status, AgentStatus::Completed);
+}
+
+#[test]
+fn merge_debounces_working_to_needs_attention() {
+    let state = AppState::new();
+    let t0 = 1_700_000_010_000;
+    state.merge_sessions_at(vec![sample_session("agent-1", AgentStatus::Working)], t0);
+
+    let merged = state.merge_sessions_at(
+        vec![sample_session("agent-1", AgentStatus::NeedsAttention)],
+        t0 + 1_000,
+    );
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::Working);
+
+    let merged = state.merge_sessions_at(
+        vec![sample_session("agent-1", AgentStatus::NeedsAttention)],
+        t0 + WORKING_HOLD_MS + 1,
+    );
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, AgentStatus::NeedsAttention);
 }
 
 #[test]
@@ -406,12 +562,4 @@ fn dismiss_awaiting_stays_hidden_until_status_changes() {
     let merged = state.merge_sessions(vec![sample_session("agent-1", AgentStatus::Working)]);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].status, AgentStatus::Working);
-}
-
-#[test]
-fn cloud_pending_interaction_needs_attention() {
-    let now = 1_700_000_010_000;
-    let (status, active) = map_cloud_activity(Some(1), Some(1), now, true, now);
-    assert!(active);
-    assert_eq!(status, AgentStatus::NeedsAttention);
 }

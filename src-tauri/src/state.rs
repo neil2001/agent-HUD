@@ -4,12 +4,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sessions::{sort_agent_sessions, AgentSession, AgentStatus};
 
-pub const WORKING_HOLD_MS: i64 = 5_000;
+/// Keep Working briefly across a 1s poll gap so a missed heartbeat cannot flash orange/green.
+pub const WORKING_HOLD_MS: i64 = 2_000;
 
 pub struct AppState {
     pub sessions: Mutex<Vec<AgentSession>>,
     dismissed: Mutex<HashMap<String, AgentStatus>>,
     last_live_at: Mutex<HashMap<String, i64>>,
+    last_working_at: Mutex<HashMap<String, i64>>,
 }
 
 impl AppState {
@@ -18,6 +20,7 @@ impl AppState {
             sessions: Mutex::new(Vec::new()),
             dismissed: Mutex::new(HashMap::new()),
             last_live_at: Mutex::new(HashMap::new()),
+            last_working_at: Mutex::new(HashMap::new()),
         }
     }
 
@@ -29,12 +32,27 @@ impl AppState {
         let mut dismissed = self.dismissed.lock().unwrap();
         let mut previous = self.sessions.lock().unwrap();
         let mut last_live_at = self.last_live_at.lock().unwrap();
+        let mut last_working_at = self.last_working_at.lock().unwrap();
 
         let live_ids: HashSet<String> = live.iter().map(|session| session.id.clone()).collect();
         let mut merged = Vec::new();
 
-        for session in live {
+        for mut session in live {
+            let discovered = session.status;
+            if discovered == AgentStatus::NeedsAttention
+                && previous
+                    .iter()
+                    .any(|prev| prev.id == session.id && prev.status == AgentStatus::Working)
+            {
+                let last = last_working_at.get(&session.id).copied().unwrap_or(0);
+                if now_ms.saturating_sub(last) <= WORKING_HOLD_MS {
+                    session.status = AgentStatus::Working;
+                }
+            }
             last_live_at.insert(session.id.clone(), now_ms);
+            if discovered == AgentStatus::Working {
+                last_working_at.insert(session.id.clone(), now_ms);
+            }
             match dismissed.get(&session.id) {
                 Some(status) if *status == session.status => continue,
                 Some(_) => {
@@ -78,6 +96,7 @@ impl AppState {
         let mut dismissed = self.dismissed.lock().unwrap();
         let mut sessions = self.sessions.lock().unwrap();
         self.last_live_at.lock().unwrap().remove(id);
+        self.last_working_at.lock().unwrap().remove(id);
         if let Some(session) = sessions.iter().find(|session| session.id == id) {
             dismissed.insert(id.to_string(), session.status);
         }
