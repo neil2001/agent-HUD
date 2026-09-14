@@ -5,8 +5,6 @@ pub const HUD_HANDLE_HEIGHT: f64 = 5.0;
 pub const HUD_ROW_HEIGHT: f64 = 22.0;
 pub const HUD_PADDING: f64 = 10.0;
 pub const HUD_MAX_VISIBLE_ROWS: usize = 8;
-const STORE_PATH: &str = "hud-window.json";
-const POSITION_KEY: &str = "position";
 
 pub fn height_for_session_count(count: usize) -> f64 {
     let rows = count.clamp(1, HUD_MAX_VISIBLE_ROWS);
@@ -20,7 +18,6 @@ mod macos {
     use tauri_nspanel::{
         CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt, tauri_panel,
     };
-    use tauri_plugin_store::StoreExt;
 
     tauri_panel! {
         panel!(HudPanel {
@@ -49,8 +46,8 @@ mod macos {
         if let Err(err) = apply_vibrancy(&window) {
             eprintln!("vibrancy failed: {err}");
         }
-        if let Err(err) = restore_or_default_position(app, &window) {
-            eprintln!("position restore failed: {err}");
+        if let Err(err) = position_top_center(&window) {
+            eprintln!("position HUD failed: {err}");
         }
 
         match window.to_panel::<HudPanel>() {
@@ -79,19 +76,12 @@ mod macos {
 
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-        let handle = app.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::Moved(position) = event {
-                persist_position(&handle, position.x as f64, position.y as f64);
-            }
-        });
-
         Ok(())
     }
 
     fn position_on_monitors(window: &WebviewWindow, x: f64, y: f64) -> bool {
         let Ok(monitors) = window.available_monitors() else {
-            return is_sane_position(x, y);
+            return x.is_finite() && y.is_finite();
         };
         monitors.into_iter().any(|monitor| {
             let pos = monitor.position();
@@ -110,7 +100,7 @@ mod macos {
                 return;
             }
         }
-        let _ = position_top_right(window);
+        let _ = position_top_center(window);
     }
 
     fn apply_vibrancy(window: &WebviewWindow) -> Result<(), String> {
@@ -119,32 +109,7 @@ mod macos {
             .map_err(|e| e.to_string())
     }
 
-    fn restore_or_default_position(
-        app: &AppHandle,
-        window: &WebviewWindow,
-    ) -> Result<(), String> {
-        if let Ok(store) = app.store(STORE_PATH) {
-            if let Some(value) = store.get(POSITION_KEY) {
-                if let Some(obj) = value.as_object() {
-                    let x = obj.get("x").and_then(|v| v.as_f64());
-                    let y = obj.get("y").and_then(|v| v.as_f64());
-                    if let (Some(x), Some(y)) = (x, y) {
-                        if position_on_monitors(window, x, y) {
-                            window
-                                .set_position(tauri::PhysicalPosition::new(x as i32, y as i32))
-                                .map_err(|e| e.to_string())?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-
-        position_top_right(window)?;
-        Ok(())
-    }
-
-    fn position_top_right(window: &WebviewWindow) -> Result<(), String> {
+    fn position_top_center(window: &WebviewWindow) -> Result<(), String> {
         if let Ok(Some(monitor)) = window.current_monitor() {
             let scale = monitor.scale_factor();
             let size = monitor.size();
@@ -153,35 +118,11 @@ mod macos {
                 .unwrap_or_else(|_| tauri::PhysicalSize::new(280, 120));
             let logical_w = window_size.width as f64 / scale;
             let screen_w = size.width as f64 / scale;
-            let x = screen_w - logical_w - 12.0;
+            let x = (screen_w - logical_w) / 2.0;
             let y = 12.0;
             let _ = window.set_position(LogicalPosition::new(x, y));
-            if let Ok(pos) = window.outer_position() {
-                persist_position(window.app_handle(), pos.x as f64, pos.y as f64);
-            }
         }
         Ok(())
-    }
-
-    pub fn persist_position(app: &AppHandle, x: f64, y: f64) {
-        if let Some(window) = app.get_webview_window("main") {
-            if !position_on_monitors(&window, x, y) {
-                return;
-            }
-        } else if !is_sane_position(x, y) {
-            return;
-        }
-        if let Ok(store) = app.store(STORE_PATH) {
-            let _ = store.set(
-                POSITION_KEY,
-                serde_json::json!({ "x": x, "y": y }),
-            );
-            let _ = store.save();
-        }
-    }
-
-    fn is_sane_position(x: f64, y: f64) -> bool {
-        x.is_finite() && y.is_finite() && (-200.0..=6_000.0).contains(&x) && (-200.0..=4_000.0).contains(&y)
     }
 
     pub fn sync_visibility(app: &AppHandle, session_count: usize) {
@@ -227,8 +168,6 @@ mod macos {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-
-    pub fn persist_position(_app: &AppHandle, _x: f64, _y: f64) {}
 
     pub fn sync_visibility(app: &AppHandle, session_count: usize) {
         if let Some(window) = app.get_webview_window("main") {
