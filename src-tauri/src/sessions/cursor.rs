@@ -68,23 +68,30 @@ pub fn discover_active_sessions() -> Vec<AgentSession> {
     let Some((global_db, workspace_root, transcripts_root)) = cursor_support_paths() else {
         return Vec::new();
     };
+    discover_from_support_paths(&global_db, &workspace_root, &transcripts_root)
+}
 
+pub fn discover_from_support_paths(
+    global_db: &Path,
+    workspace_root: &Path,
+    transcripts_root: &Path,
+) -> Vec<AgentSession> {
     if !global_db.exists() {
         return Vec::new();
     }
 
-    let conn = match open_readonly(&global_db) {
+    let conn = match open_readonly(global_db) {
         Ok(conn) => conn,
         Err(_) => return Vec::new(),
     };
 
     let now_ms = now_ms();
-    let transcript_activity = recent_transcript_activity(&transcripts_root, now_ms);
+    let transcript_activity = recent_transcript_activity(transcripts_root, now_ms);
     let mut sessions = HashMap::new();
 
     collect_from_composer_headers(&conn, now_ms, &transcript_activity, &mut sessions);
     collect_from_cloud_agents(&conn, &mut sessions);
-    collect_from_workspace_fallback(&workspace_root, now_ms, &transcript_activity, &mut sessions);
+    collect_from_workspace_fallback(workspace_root, now_ms, &transcript_activity, &mut sessions);
 
     let mut active: Vec<AgentSession> = sessions
         .into_values()
@@ -811,7 +818,7 @@ fn json_flag(value: &Value, key: &str) -> bool {
     value.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-fn is_agent_session(header: &Value, composer_data: Option<&Value>) -> bool {
+pub fn is_agent_session(header: &Value, composer_data: Option<&Value>) -> bool {
     let unified = header
         .get("unifiedMode")
         .or_else(|| composer_data.and_then(|d| d.get("unifiedMode")))
@@ -822,9 +829,10 @@ fn is_agent_session(header: &Value, composer_data: Option<&Value>) -> bool {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Cursor's unified UI stores executing Plan sessions as `plan`, not `agent`.
-    // Include those; skip only plain chat.
-    matches!(unified, Some("agent") | Some("plan")) || is_agentic
+    // Agent, Plan, and Ask. Ask is stored as `chat` with `isAgentic: false`
+    // even while tools are running. Idle chats still drop out in
+    // composer_session_status (no generating / tools / unfinished run).
+    matches!(unified, Some("agent") | Some("plan") | Some("chat")) || is_agentic
 }
 
 fn value_is_nonempty(value: &Value) -> bool {

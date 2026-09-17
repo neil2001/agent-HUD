@@ -1,6 +1,7 @@
 use agent_hud_lib::sessions::cursor::{
-    bubble_is_live_tool, classify, classify_cloud, composer_session_status, is_waiting_on_user,
-    last_turn_kind, LastTurnKind, UNFINISHED_PROMPT_RECENCY_MS,
+    bubble_is_live_tool, classify, classify_cloud, composer_session_status,
+    discover_from_support_paths, is_agent_session, is_waiting_on_user, last_turn_kind, LastTurnKind,
+    UNFINISHED_PROMPT_RECENCY_MS,
 };
 use agent_hud_lib::sessions::{AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
 use agent_hud_lib::state::{AppState, WORKING_HOLD_MS};
@@ -60,6 +61,26 @@ fn create_fixture_db(path: &std::path::Path) {
     conn.execute(
         "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
         rusqlite::params!["composerData:agent-1", composer_data],
+    )
+    .expect("insert composer data");
+}
+
+fn insert_composer(
+    conn: &Connection,
+    id: &str,
+    header: serde_json::Value,
+    data: serde_json::Value,
+    now: i64,
+) {
+    conn.execute(
+        "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, recency, value)
+         VALUES (?1, ?2, ?3, ?4, 0, 0, ?3, ?5)",
+        rusqlite::params![id, "ws-1", now, now, header.to_string()],
+    )
+    .expect("insert header");
+    conn.execute(
+        "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+        rusqlite::params![format!("composerData:{id}"), data.to_string()],
     )
     .expect("insert composer data");
 }
@@ -156,6 +177,133 @@ fn fixture_db_has_expected_tables() {
         .expect("count headers");
 
     assert_eq!(count, 1);
+}
+
+#[test]
+fn ask_mode_chat_is_an_agent_session() {
+    let header = serde_json::json!({ "unifiedMode": "chat", "isDraft": false });
+    let data = serde_json::json!({
+        "unifiedMode": "chat",
+        "isAgentic": false,
+        "status": "aborted"
+    });
+    assert!(is_agent_session(&header, Some(&data)));
+    assert!(is_agent_session(
+        &serde_json::json!({ "unifiedMode": "agent" }),
+        Some(&serde_json::json!({ "isAgentic": true }))
+    ));
+    assert!(is_agent_session(
+        &serde_json::json!({ "unifiedMode": "plan" }),
+        None
+    ));
+    assert!(!is_agent_session(
+        &serde_json::json!({ "unifiedMode": "editor" }),
+        Some(&serde_json::json!({ "isAgentic": false }))
+    ));
+}
+
+#[test]
+fn ask_mode_unfinished_tool_run_is_working() {
+    let now = 1_700_000_010_000;
+    let (data, header) = composer(
+        "aborted",
+        Some(now - 1_000),
+        Some(LastTurnKind::Tool),
+        serde_json::json!({
+            "unifiedMode": "chat",
+            "isAgentic": false
+        }),
+    );
+    assert_eq!(
+        composer_session_status(Some(&data), &header, now, None, false, now),
+        Some(AgentStatus::Working)
+    );
+}
+
+#[test]
+fn discover_includes_ask_mode_and_skips_idle_chat() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("state.vscdb");
+    let workspace_root = dir.path().join("workspaceStorage");
+    let transcripts_root = dir.path().join("agent-transcripts");
+    std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+    std::fs::create_dir_all(&transcripts_root).expect("transcripts dir");
+
+    let conn = Connection::open(&db_path).expect("open fixture db");
+    conn.execute_batch(
+        "
+        CREATE TABLE composerHeaders (
+            composerId TEXT PRIMARY KEY,
+            workspaceId TEXT,
+            createdAt INTEGER,
+            lastUpdatedAt INTEGER,
+            isArchived INTEGER,
+            isSubagent INTEGER,
+            recency INTEGER,
+            checkpointAt INTEGER,
+            subagentTypeName TEXT,
+            value TEXT
+        );
+        CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);
+        ",
+    )
+    .expect("create tables");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .expect("now");
+    insert_composer(
+        &conn,
+        "ask-live",
+        serde_json::json!({
+            "composerId": "ask-live",
+            "unifiedMode": "chat",
+            "isDraft": false,
+            "name": "Ask live",
+            "unfinishedRunAt": now,
+            "workspaceIdentifier": {"uri": {"fsPath": "/Users/test/Projects/ask"}}
+        }),
+        serde_json::json!({
+            "composerId": "ask-live",
+            "status": "aborted",
+            "unifiedMode": "chat",
+            "isAgentic": false,
+            "isDraft": false,
+            "unfinishedRunAt": now,
+            "generatingBubbleIds": [],
+            "fullConversationHeadersOnly": [last_header(LastTurnKind::Tool)]
+        }),
+        now,
+    );
+    insert_composer(
+        &conn,
+        "chat-idle",
+        serde_json::json!({
+            "composerId": "chat-idle",
+            "unifiedMode": "chat",
+            "isDraft": false,
+            "name": "Idle chat",
+            "workspaceIdentifier": {"uri": {"fsPath": "/Users/test/Projects/chat"}}
+        }),
+        serde_json::json!({
+            "composerId": "chat-idle",
+            "status": "none",
+            "unifiedMode": "chat",
+            "isAgentic": false,
+            "isDraft": false,
+            "generatingBubbleIds": []
+        }),
+        now,
+    );
+    drop(conn);
+
+    let sessions = discover_from_support_paths(&db_path, &workspace_root, &transcripts_root);
+    let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec!["ask-live"]);
+    assert_eq!(sessions[0].status, AgentStatus::Working);
+    assert_eq!(sessions[0].title, "Ask live");
 }
 
 #[test]
