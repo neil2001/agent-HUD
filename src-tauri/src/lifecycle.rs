@@ -3,6 +3,8 @@ use tauri::{
     tray::TrayIconBuilder,
     App,
 };
+
+use crate::flow_window;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 pub fn init_autostart(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
@@ -22,16 +24,23 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         "Enable Open at Login"
     };
 
+    let open_flow =
+        MenuItem::with_id(app, "open-flow", "Open Agent Flow", true, None::<&str>)?;
     let autostart = MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit agent-HUD", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&autostart, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&open_flow, &separator, &autostart, &separator, &quit])?;
 
     let mut tray = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("agent-HUD")
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "open-flow" => {
+                if let Err(err) = flow_window::open_flow_window(app) {
+                    eprintln!("failed to open Agent Flow: {err}");
+                }
+            }
             "quit" => app.exit(0),
             "autostart" => toggle_autostart(app),
             _ => {}
