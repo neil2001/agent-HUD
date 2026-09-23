@@ -477,7 +477,11 @@ fn session_from_chat(chat: &ChatRecord, tty: Option<String>) -> AgentSession {
             name: project_name,
             path: Some(chat.cwd.clone()),
         },
-        status: AgentStatus::Working,
+        status: if chat.turn_open {
+            AgentStatus::Working
+        } else {
+            AgentStatus::Waiting
+        },
         host: SessionHost::CursorCli {
             workspace_path: chat.cwd.clone(),
             tty,

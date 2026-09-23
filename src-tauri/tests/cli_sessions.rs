@@ -237,6 +237,7 @@ fn title_is_used_when_present_and_process_tty_is_kept() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].title, "Fix the parser");
     assert_eq!(sessions[0].project.name, "api");
+    assert_eq!(sessions[0].status, AgentStatus::Waiting);
     assert_eq!(cli_tty(&sessions[0]), Some("/dev/ttys004".to_string()));
 }
 
@@ -339,11 +340,13 @@ fn open_turn_does_not_borrow_another_conversations_terminal() {
         .find(|session| session.id == "conv-b")
         .unwrap();
     assert_eq!(cli_tty(b), None);
+    assert_eq!(b.status, AgentStatus::Working);
     let a = sessions
         .iter()
         .find(|session| session.id == "conv-a")
         .unwrap();
     assert_eq!(cli_tty(a), Some("/dev/ttys001".to_string()));
+    assert_eq!(a.status, AgentStatus::Waiting);
 }
 
 #[test]
@@ -386,6 +389,7 @@ fn one_unbound_process_ties_the_only_open_turn_in_the_workspace() {
     let sessions = discover_cli_sessions(&roots(dir.path()), &[process(4, cwd, "ttys009", None)]);
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "open");
+    assert_eq!(sessions[0].status, AgentStatus::Working);
     assert_eq!(cli_tty(&sessions[0]), Some("/dev/ttys009".to_string()));
 }
 
@@ -398,6 +402,7 @@ fn single_unbound_process_matches_the_only_chat_in_its_workspace() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "only");
     assert_eq!(sessions[0].title, "api");
+    assert_eq!(sessions[0].status, AgentStatus::Waiting);
     assert_eq!(cli_tty(&sessions[0]), Some("/dev/ttys009".to_string()));
 }
 
@@ -601,6 +606,7 @@ fn cli_click_focuses_the_tty_and_tmux_client_when_the_agent_is_inside_tmux() {
     let clients = vec![TmuxClient {
         tty: "/dev/ttys000".to_string(),
         session_id: "$0".to_string(),
+        window_id: "@2".to_string(),
     }];
     match focus_plan(&inside, &panes, &clients).unwrap() {
         FocusPlan::Terminal { tty, tmux } => {
@@ -615,6 +621,73 @@ fn cli_click_focuses_the_tty_and_tmux_client_when_the_agent_is_inside_tmux() {
 
     let detached = plan_terminal_focus("ttys011", &panes, &[]);
     assert_eq!(detached.unwrap_err(), UNIDENTIFIED_TERMINAL);
+
+    let other_window = plan_terminal_focus(
+        "ttys011",
+        &panes,
+        &[TmuxClient {
+            tty: "/dev/ttys003".to_string(),
+            session_id: "$0".to_string(),
+            window_id: "@1".to_string(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(other_window.terminal_tty, "/dev/ttys003");
+
+    let preferred = plan_terminal_focus(
+        "ttys011",
+        &panes,
+        &[
+            TmuxClient {
+                tty: "/dev/ttys003".to_string(),
+                session_id: "$0".to_string(),
+                window_id: "@1".to_string(),
+            },
+            TmuxClient {
+                tty: "/dev/ttys000".to_string(),
+                session_id: "$0".to_string(),
+                window_id: "@2".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(preferred.terminal_tty, "/dev/ttys000");
+
+    let ambiguous_window = plan_terminal_focus(
+        "ttys011",
+        &panes,
+        &[
+            TmuxClient {
+                tty: "/dev/ttys000".to_string(),
+                session_id: "$0".to_string(),
+                window_id: "@2".to_string(),
+            },
+            TmuxClient {
+                tty: "/dev/ttys003".to_string(),
+                session_id: "$0".to_string(),
+                window_id: "@2".to_string(),
+            },
+        ],
+    );
+    assert_eq!(ambiguous_window.unwrap_err(), UNIDENTIFIED_TERMINAL);
+
+    let ambiguous_session = plan_terminal_focus(
+        "ttys011",
+        &panes,
+        &[
+            TmuxClient {
+                tty: "/dev/ttys000".to_string(),
+                session_id: "$0".to_string(),
+                window_id: "@1".to_string(),
+            },
+            TmuxClient {
+                tty: "/dev/ttys003".to_string(),
+                session_id: "$0".to_string(),
+                window_id: "@3".to_string(),
+            },
+        ],
+    );
+    assert_eq!(ambiguous_session.unwrap_err(), UNIDENTIFIED_TERMINAL);
 
     let unknown = AgentSession {
         host: SessionHost::CursorCli {
@@ -634,8 +707,11 @@ fn tmux_listing_and_focus_args_reject_unidentified_targets() {
     let panes = parse_tmux_panes("%2 /dev/ttys011 $0 @2\nbogus line\n%nope /dev/ttys011 $0 @2\n");
     assert_eq!(panes.len(), 1);
     assert_eq!(panes[0].pane_id, "%2");
-    let clients = parse_tmux_clients("/dev/ttys000 $0\nnot-a-tty $0\n");
+    let clients = parse_tmux_clients(
+        "/dev/ttys000 $0 @1\nnot-a-tty $0 @1\n/dev/ttys001 $0\n/dev/ttys002 $0 @nope\n",
+    );
     assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].window_id, "@1");
 
     let args = tmux_focus_args(&TmuxTarget {
         client_tty: "/dev/ttys000".to_string(),

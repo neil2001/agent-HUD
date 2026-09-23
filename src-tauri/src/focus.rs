@@ -24,6 +24,7 @@ pub struct TmuxPane {
 pub struct TmuxClient {
     pub tty: String,
     pub session_id: String,
+    pub window_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,10 +97,25 @@ pub fn plan_terminal_focus(
         .iter()
         .find(|pane| normalize_tty(&pane.tty).as_deref() == Some(agent_tty.as_str()))
     {
-        let Some(client) = clients
+        let on_window: Vec<&TmuxClient> = clients
             .iter()
-            .find(|client| client.session_id == pane.session_id)
-        else {
+            .filter(|client| {
+                client.session_id == pane.session_id && client.window_id == pane.window_id
+            })
+            .collect();
+        let client = if on_window.len() == 1 {
+            on_window[0]
+        } else if on_window.is_empty() {
+            let on_session: Vec<&TmuxClient> = clients
+                .iter()
+                .filter(|client| client.session_id == pane.session_id)
+                .collect();
+            if on_session.len() == 1 {
+                on_session[0]
+            } else {
+                return Err(UNIDENTIFIED_TERMINAL.to_string());
+            }
+        } else {
             return Err(UNIDENTIFIED_TERMINAL.to_string());
         };
         let client_tty =
@@ -155,13 +171,19 @@ pub fn parse_tmux_clients(output: &str) -> Vec<TmuxClient> {
             let mut parts = line.split_whitespace();
             let tty = parts.next()?.to_string();
             let session_id = parts.next()?.to_string();
+            let window_id = parts.next()?.to_string();
             if parts.next().is_some()
                 || normalize_tty(&tty).is_none()
                 || !valid_session_id(&session_id)
+                || !valid_window_id(&window_id)
             {
                 return None;
             }
-            Some(TmuxClient { tty, session_id })
+            Some(TmuxClient {
+                tty,
+                session_id,
+                window_id,
+            })
         })
         .collect()
 }
@@ -303,7 +325,6 @@ fn raise_terminal(tty: &str) -> Result<(), String> {
         }
         TerminalKind::AppleTerminal => run_osascript(&terminal_app_focus_script(tty)),
         TerminalKind::ITerm => run_osascript(&iterm_focus_script(tty)),
-        TerminalKind::Named(name) => activate_app(&name),
     }
 }
 
@@ -311,7 +332,6 @@ enum TerminalKind {
     Ghostty,
     AppleTerminal,
     ITerm,
-    Named(String),
 }
 
 fn detect_terminal_app(tty: &str) -> Option<TerminalKind> {
@@ -327,8 +347,10 @@ fn detect_terminal_app(tty: &str) -> Option<TerminalKind> {
             let Some(row) = table.get(&current) else {
                 break;
             };
-            if let Some(kind) = terminal_kind_from_comm(&row.comm) {
-                return Some(kind);
+            match terminal_kind_from_comm(&row.comm) {
+                CommMatch::Kind(kind) => return Some(kind),
+                CommMatch::Unsupported => return None,
+                CommMatch::None => {}
             }
             if row.ppid == 0 || row.ppid == current {
                 break;
@@ -383,23 +405,27 @@ fn process_table() -> Option<HashMap<u32, ProcRow>> {
     Some(table)
 }
 
-fn terminal_kind_from_comm(comm: &str) -> Option<TerminalKind> {
+enum CommMatch {
+    Kind(TerminalKind),
+    Unsupported,
+    None,
+}
+
+fn terminal_kind_from_comm(comm: &str) -> CommMatch {
     if comm.contains("Ghostty.app") {
-        Some(TerminalKind::Ghostty)
+        CommMatch::Kind(TerminalKind::Ghostty)
     } else if comm.contains("iTerm") {
-        Some(TerminalKind::ITerm)
+        CommMatch::Kind(TerminalKind::ITerm)
     } else if comm.contains("Terminal.app") {
-        Some(TerminalKind::AppleTerminal)
-    } else if comm.contains("Warp.app") {
-        Some(TerminalKind::Named("Warp".to_string()))
-    } else if comm.contains("kitty.app") {
-        Some(TerminalKind::Named("kitty".to_string()))
-    } else if comm.contains("WezTerm.app") {
-        Some(TerminalKind::Named("WezTerm".to_string()))
-    } else if comm.contains("Alacritty.app") {
-        Some(TerminalKind::Named("Alacritty".to_string()))
+        CommMatch::Kind(TerminalKind::AppleTerminal)
+    } else if comm.contains("Warp.app")
+        || comm.contains("kitty.app")
+        || comm.contains("WezTerm.app")
+        || comm.contains("Alacritty.app")
+    {
+        CommMatch::Unsupported
     } else {
-        None
+        CommMatch::None
     }
 }
 
@@ -448,24 +474,6 @@ fn cwd_of_pid(pid: u32) -> Option<String> {
     None
 }
 
-fn activate_app(name: &str) -> Result<(), String> {
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-')
-    {
-        return Err(UNIDENTIFIED_TERMINAL.to_string());
-    }
-    let status = Command::new("/usr/bin/open")
-        .args(["-a", name])
-        .status()
-        .map_err(|err| err.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(UNIDENTIFIED_TERMINAL.to_string())
-    }
-}
-
 fn run_osascript(script: &str) -> Result<(), String> {
     match run_command("/usr/bin/osascript", &["-e", script], FOCUS_TIMEOUT) {
         Some(result) if result.success => Ok(()),
@@ -492,7 +500,11 @@ fn current_tmux() -> (Vec<TmuxPane>, Vec<TmuxClient>) {
     .unwrap_or_default();
     let clients = run_command(
         &bin,
-        &["list-clients", "-F", "#{client_tty} #{session_id}"],
+        &[
+            "list-clients",
+            "-F",
+            "#{client_tty} #{session_id} #{window_id}",
+        ],
         FOCUS_TIMEOUT,
     )
     .filter(|result| result.success)
@@ -509,6 +521,15 @@ fn tmux_binary() -> Option<String> {
     ] {
         if Path::new(candidate).is_file() {
             return Some(candidate.to_string());
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("tmux");
+        if let Some(path) = candidate.to_str() {
+            if candidate.is_file() {
+                return Some(path.to_string());
+            }
         }
     }
     None
