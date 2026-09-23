@@ -92,6 +92,30 @@ pub struct FlowTimeline {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttentionReport {
+    pub focused_ms: i64,
+    pub sessions: u64,
+    pub turns: u64,
+    pub agent_runtime_ms: i64,
+    pub turns_per_hour: Option<f64>,
+    pub apps: Vec<AttentionApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttentionApp {
+    pub app_name: String,
+    pub is_cursor: bool,
+    pub focused_ms: i64,
+    pub children: Vec<AttentionChild>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttentionChild {
+    pub label: String,
+    pub focused_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowRiver {
     pub range_start_ms: i64,
     pub range_end_ms: i64,
@@ -301,6 +325,167 @@ pub fn compute_timeline(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flo
         agents,
         river,
     }
+}
+
+const ATTENTION_FLOOR_MS: i64 = 60_000;
+
+pub fn compute_attention(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> AttentionReport {
+    let summary = compute_summary(events, start_ms, end_ms);
+    let focus = clean_focus_points(&focus_points(events));
+    let intervals = focus_intervals(&focus, start_ms, end_ms);
+    let turns = build_turns(events, end_ms);
+    let focused_ms = intervals
+        .iter()
+        .map(|interval| interval.end - interval.start)
+        .sum();
+
+    struct AppAcc {
+        cursor_ms: i64,
+        chrome_ms: i64,
+        focused_ms: i64,
+    }
+
+    let mut grouped: std::collections::BTreeMap<String, AppAcc> = std::collections::BTreeMap::new();
+    for interval in &intervals {
+        let duration = interval.end - interval.start;
+        let entry = grouped.entry(interval.app_name.clone()).or_insert(AppAcc {
+            cursor_ms: 0,
+            chrome_ms: 0,
+            focused_ms: 0,
+        });
+        entry.focused_ms += duration;
+        if interval_is_cursor(interval) {
+            entry.cursor_ms += duration;
+        }
+        if interval.bundle_id == CHROME_BUNDLE_ID {
+            entry.chrome_ms += duration;
+        }
+    }
+
+    let tab_children = fold_attention_children(
+        chrome_page_totals(events, &focus, &intervals, start_ms, end_ms)
+            .into_iter()
+            .filter(|page| page.total_ms > 0)
+            .map(|page| AttentionChild {
+                label: page.label,
+                focused_ms: page.total_ms,
+            })
+            .collect(),
+        "Other tabs",
+    );
+    let session_children = fold_attention_children(
+        agent_bands_from_turns(&turns, &intervals, start_ms, end_ms)
+            .into_iter()
+            .filter_map(|band| {
+                let focused = band
+                    .pieces
+                    .iter()
+                    .filter(|piece| !piece.autonomous)
+                    .map(|piece| piece.end_ms - piece.start_ms)
+                    .sum();
+                if focused <= 0 {
+                    None
+                } else {
+                    Some(AttentionChild {
+                        label: band.label,
+                        focused_ms: focused,
+                    })
+                }
+            })
+            .collect(),
+        "Other sessions",
+    );
+
+    let mut apps: Vec<AttentionApp> = grouped
+        .into_iter()
+        .map(|(app_name, acc)| {
+            let is_cursor = host_majority(acc.cursor_ms, acc.focused_ms);
+            let is_chrome = host_majority(acc.chrome_ms, acc.focused_ms);
+            AttentionApp {
+                children: if is_cursor {
+                    session_children.clone()
+                } else if is_chrome {
+                    tab_children.clone()
+                } else {
+                    Vec::new()
+                },
+                app_name,
+                is_cursor,
+                focused_ms: acc.focused_ms,
+            }
+        })
+        .collect();
+    apps = fold_attention_apps(apps);
+    sort_attention_apps(&mut apps);
+
+    AttentionReport {
+        focused_ms,
+        sessions: summary.sessions,
+        turns: summary.turns,
+        agent_runtime_ms: summary.agent_runtime_ms,
+        turns_per_hour: summary.turns_per_hour,
+        apps,
+    }
+}
+
+fn host_majority(host_ms: i64, total_ms: i64) -> bool {
+    total_ms > 0 && host_ms * 2 > total_ms
+}
+
+fn fold_attention_children(rows: Vec<AttentionChild>, other_label: &str) -> Vec<AttentionChild> {
+    let mut kept = Vec::new();
+    let mut other_ms = 0i64;
+    for row in rows {
+        if row.focused_ms < ATTENTION_FLOOR_MS {
+            other_ms += row.focused_ms;
+        } else {
+            kept.push(row);
+        }
+    }
+    kept.sort_by(|a, b| {
+        b.focused_ms
+            .cmp(&a.focused_ms)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    if other_ms > 0 {
+        kept.push(AttentionChild {
+            label: other_label.to_string(),
+            focused_ms: other_ms,
+        });
+    }
+    kept
+}
+
+fn fold_attention_apps(apps: Vec<AttentionApp>) -> Vec<AttentionApp> {
+    let mut kept = Vec::new();
+    let mut other_ms = 0i64;
+    for app in apps {
+        if app.app_name == "Other" || app.focused_ms < ATTENTION_FLOOR_MS {
+            other_ms += app.focused_ms;
+        } else {
+            kept.push(app);
+        }
+    }
+    if other_ms > 0 {
+        kept.push(AttentionApp {
+            app_name: "Other".to_string(),
+            is_cursor: false,
+            focused_ms: other_ms,
+            children: Vec::new(),
+        });
+    }
+    kept
+}
+
+fn sort_attention_apps(apps: &mut [AttentionApp]) {
+    apps.sort_by(|a, b| {
+        let tail = |app: &AttentionApp| app.app_name == "Other";
+        tail(a).cmp(&tail(b)).then_with(|| {
+            b.focused_ms
+                .cmp(&a.focused_ms)
+                .then_with(|| a.app_name.cmp(&b.app_name))
+        })
+    });
 }
 
 struct FocusInterval {
@@ -587,6 +772,35 @@ fn chrome_page_rows(
     start_ms: i64,
     end_ms: i64,
 ) -> Vec<RiverPage> {
+    let mut rows = chrome_page_totals(events, app_focus, intervals, start_ms, end_ms);
+    if rows.len() <= CHROME_PAGE_ROW_LIMIT {
+        return rows;
+    }
+    let rest = rows.split_off(CHROME_PAGE_ROW_LIMIT);
+    let mut other_segments = Vec::new();
+    for row in rest {
+        other_segments.extend(row.segments);
+    }
+    other_segments.sort_by_key(|segment| segment.start_ms);
+    let other_total = other_segments
+        .iter()
+        .map(|segment| segment.end_ms - segment.start_ms)
+        .sum();
+    rows.push(RiverPage {
+        label: "Other tabs".to_string(),
+        total_ms: other_total,
+        segments: other_segments,
+    });
+    rows
+}
+
+fn chrome_page_totals(
+    events: &[FlowEvent],
+    app_focus: &[FocusPoint],
+    intervals: &[FocusInterval],
+    start_ms: i64,
+    end_ms: i64,
+) -> Vec<RiverPage> {
     let points = chrome_page_points(events);
     if points.is_empty() {
         return Vec::new();
@@ -659,24 +873,6 @@ fn chrome_page_rows(
         b.total_ms
             .cmp(&a.total_ms)
             .then_with(|| a.label.cmp(&b.label))
-    });
-    if rows.len() <= CHROME_PAGE_ROW_LIMIT {
-        return rows;
-    }
-    let rest = rows.split_off(CHROME_PAGE_ROW_LIMIT);
-    let mut other_segments = Vec::new();
-    for row in rest {
-        other_segments.extend(row.segments);
-    }
-    other_segments.sort_by_key(|segment| segment.start_ms);
-    let other_total = other_segments
-        .iter()
-        .map(|segment| segment.end_ms - segment.start_ms)
-        .sum();
-    rows.push(RiverPage {
-        label: "Other tabs".to_string(),
-        total_ms: other_total,
-        segments: other_segments,
     });
     rows
 }
@@ -1900,5 +2096,79 @@ mod tests {
         assert_eq!(river.lanes.len(), 1);
         assert_eq!(river.lanes[0].app_name, "Chrome");
         assert!(river.lanes[0].pages.is_empty());
+    }
+
+    #[test]
+    fn attention_ranks_apps_tabs_and_focused_session_time() {
+        let events = vec![
+            focus("com.apple.Safari", "Safari", 0),
+            focus(CHROME_BUNDLE_ID, "Chrome", 120_000),
+            page("a.example/alpha", "Alpha", 120_000),
+            page("b.example/beta", "Beta", 240_000),
+            focus(CURSOR_BUNDLE_ID, "Cursor", 360_000),
+            turn_start_named("s1", "s1:1", "Tokens", 300_000),
+            turn_end("s1", "s1:1", 480_000),
+            turn_start_named("s2", "s2:1", "River", 480_000),
+            turn_end("s2", "s2:1", 660_000),
+        ];
+        let report = compute_attention(&events, 0, 720_000);
+        assert_eq!(report.focused_ms, 720_000);
+        assert_eq!(report.sessions, 2);
+        assert_eq!(report.turns, 2);
+        assert_eq!(report.agent_runtime_ms, 360_000);
+        assert_eq!(
+            report
+                .apps
+                .iter()
+                .map(|app| app.app_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Cursor", "Chrome", "Safari"]
+        );
+        assert_eq!(report.apps[0].focused_ms, 360_000);
+        assert!(report.apps[0].is_cursor);
+        assert_eq!(report.apps[0].children[0].label, "agent-HUD · River");
+        assert_eq!(report.apps[0].children[0].focused_ms, 180_000);
+        assert_eq!(report.apps[0].children[1].label, "agent-HUD · Tokens");
+        assert_eq!(report.apps[0].children[1].focused_ms, 120_000);
+        assert_eq!(report.apps[1].focused_ms, 240_000);
+        assert_eq!(
+            report.apps[1]
+                .children
+                .iter()
+                .map(|child| (child.label.as_str(), child.focused_ms))
+                .collect::<Vec<_>>(),
+            vec![("Alpha", 120_000), ("Beta", 120_000)]
+        );
+        assert_eq!(report.apps[2].focused_ms, 120_000);
+        assert!(report.apps[2].children.is_empty());
+    }
+
+    #[test]
+    fn attention_stray_cursor_bundle_does_not_give_sessions_to_another_app() {
+        let events = vec![
+            focus("com.neilxu.agent-hud", "agent-hud", 0),
+            focus(CURSOR_BUNDLE_ID, "agent-hud", 60_000),
+            focus("com.neilxu.agent-hud", "agent-hud", 62_000),
+            focus(CURSOR_BUNDLE_ID, "Cursor", 180_000),
+            turn_start_named("s1", "s1:1", "Tokens", 180_000),
+            turn_end("s1", "s1:1", 300_000),
+        ];
+        let report = compute_attention(&events, 0, 360_000);
+        let hud = report
+            .apps
+            .iter()
+            .find(|app| app.app_name == "agent-hud")
+            .unwrap();
+        assert!(!hud.is_cursor);
+        assert!(hud.children.is_empty());
+        let cursor = report
+            .apps
+            .iter()
+            .find(|app| app.app_name == "Cursor")
+            .unwrap();
+        assert!(cursor.is_cursor);
+        assert_eq!(cursor.children.len(), 1);
+        assert_eq!(cursor.children[0].label, "agent-HUD · Tokens");
+        assert_eq!(cursor.children[0].focused_ms, 120_000);
     }
 }

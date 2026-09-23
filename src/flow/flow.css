@@ -32,43 +32,58 @@ body,
   height: 100%;
   min-height: 0;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   overflow: hidden;
 }
 
+.flow-sidebar {
+  width: 200px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 22px 12px 16px;
+  border-right: 1px solid var(--flow-border);
+}
+
 .flow-header {
-  padding: 20px 28px 12px;
-  border-bottom: 1px solid var(--flow-border);
+  padding: 0 8px 4px;
 }
 
 .flow-header h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   letter-spacing: -0.02em;
 }
 
 .flow-header p {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   color: var(--flow-muted);
   font-size: 12px;
+  line-height: 1.4;
 }
 
 .flow-nav {
   display: flex;
-  gap: 4px;
-  padding: 12px 28px;
-  border-bottom: 1px solid var(--flow-border);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  margin-top: 20px;
+  padding: 0;
+  overflow: auto;
 }
 
 .flow-nav button {
   background: transparent;
   border: none;
   color: var(--flow-muted);
-  padding: 8px 12px;
+  padding: 8px 10px;
   border-radius: 8px;
   cursor: pointer;
   font: inherit;
+  text-align: left;
+  width: 100%;
 }
 
 .flow-nav button[data-active="true"] {
@@ -78,8 +93,9 @@ body,
 
 .flow-main {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  padding: 24px 28px 40px;
+  padding: 28px 32px 40px;
   overflow: auto;
 }
 
@@ -140,9 +156,6 @@ body,
   font-size: 12px;
   color: var(--flow-muted);
   font-variant-numeric: tabular-nums;
-  cursor: help;
-  text-decoration: underline dotted rgba(255, 255, 255, 0.28);
-  text-underline-offset: 3px;
 }
 
 .flow-loop-caption {
@@ -158,10 +171,6 @@ body,
   gap: 12px;
 }
 
-.flow-share-histogram .flow-help-trigger {
-  display: block;
-}
-
 .flow-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -171,24 +180,19 @@ body,
 .flow-help-trigger {
   display: block;
   min-width: 0;
-  height: 100%;
   cursor: help;
   outline: none;
+}
+
+.flow-help-trigger-compact {
+  display: inline;
+  text-decoration: underline dotted rgba(255, 255, 255, 0.28);
+  text-underline-offset: 3px;
 }
 
 .flow-help-trigger:focus-visible {
   border-radius: 10px;
   box-shadow: 0 0 0 2px var(--flow-accent);
-}
-
-.flow-help-trigger .flow-stat {
-  height: 100%;
-}
-
-.flow-help-trigger .flow-stat-label,
-.flow-help-trigger .flow-section-title {
-  text-decoration: underline dotted rgba(255, 255, 255, 0.28);
-  text-underline-offset: 3px;
 }
 
 .flow-stat {
@@ -547,13 +551,125 @@ body,
   margin-bottom: 16px;
 }
 
+.flow-attention {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.flow-attention-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.flow-attention-hero {
+  min-width: 0;
+}
+
+.flow-attention-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px 36px;
+}
+
+.flow-attention-metric .flow-activity-value {
+  font-size: 22px;
+}
+
+.flow-attention-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.flow-attention-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flow-attention-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 168px) minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.flow-attention-row-child {
+  font-size: 12px;
+  color: var(--flow-muted);
+}
+
+.flow-attention-row-child .flow-attention-name {
+  padding-left: 16px;
+}
+
+.flow-attention-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-attention-duration {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--flow-muted);
+  font-size: 12px;
+}
+
+.flow-attention-fill-child {
+  opacity: 0.55;
+}
+
+.flow-attention-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 16px;
+}
+
+.flow-range {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.flow-range-stepper .flow-river-caption,
+.flow-range-label {
+  padding: 0 4px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--flow-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.flow-range-label {
+  min-width: 4.25rem;
+}
+
+.flow-range-stepper button {
+  padding: 4px 6px;
+  min-width: 1.75rem;
+}
+
+.flow-range button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .flow-pr-windows {
   display: flex;
   gap: 4px;
   margin-bottom: 16px;
 }
 
-.flow-pr-windows button {
+.flow-pr-windows button,
+.flow-range button {
   background: transparent;
   border: none;
   color: var(--flow-muted);
@@ -563,7 +679,8 @@ body,
   font: inherit;
 }
 
-.flow-pr-windows button[data-active="true"] {
+.flow-pr-windows button[data-active="true"],
+.flow-range button[data-active="true"] {
   background: var(--flow-surface);
   color: var(--flow-text);
 }

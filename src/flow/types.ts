@@ -122,6 +122,27 @@ export type FlowTimeline = {
   river: FlowRiver;
 };
 
+export type AttentionChild = {
+  label: string;
+  focused_ms: number;
+};
+
+export type AttentionApp = {
+  app_name: string;
+  is_cursor: boolean;
+  focused_ms: number;
+  children: AttentionChild[];
+};
+
+export type AttentionReport = {
+  focused_ms: number;
+  sessions: number;
+  turns: number;
+  agent_runtime_ms: number;
+  turns_per_hour: number | null;
+  apps: AttentionApp[];
+};
+
 export type FlowSettings = {
   recording_enabled: boolean;
   retention_days: number;

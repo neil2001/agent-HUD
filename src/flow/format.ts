@@ -57,6 +57,83 @@ export function formatRelative(ts: number, now = Date.now()): string {
   return `${months}mo ago`;
 }
 
+export type AttentionSpan = "1d" | "7d" | "14d" | "30d";
+
+export const ATTENTION_SPANS: ReadonlyArray<readonly [AttentionSpan, string]> = [
+  ["1d", "1 day"],
+  ["7d", "7 days"],
+  ["14d", "14 days"],
+  ["30d", "30 days"],
+];
+
+export function spanLengthDays(span: AttentionSpan): number {
+  switch (span) {
+    case "1d":
+      return 1;
+    case "7d":
+      return 7;
+    case "14d":
+      return 14;
+    case "30d":
+      return 30;
+  }
+}
+
+function startOfLocalDay(now: number): Date {
+  const today = new Date(now);
+  return new Date(today.getFullYear(), today.getMonth(), today.getDate());
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+export function attentionBoundsMs(
+  span: AttentionSpan,
+  stepsBack = 0,
+  now = Date.now(),
+): [number, number] {
+  const days = spanLengthDays(span);
+  const latestStart = addDays(startOfLocalDay(now), -(days - 1));
+  const start = addDays(latestStart, -stepsBack * days);
+  if (stepsBack === 0) return [start.getTime(), now];
+  return [start.getTime(), addDays(start, days).getTime()];
+}
+
+export function dayBoundsMs(stepsBack = 0, now = Date.now()): [number, number] {
+  const start = addDays(startOfLocalDay(now), -stepsBack);
+  const next = addDays(start, 1).getTime();
+  const end = stepsBack === 0 ? Math.min(next, now) : next;
+  return [start.getTime(), end];
+}
+
+function formatMonthDay(date: Date): string {
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+export function formatDayLabel(startMs: number, now = Date.now()): string {
+  const start = startOfLocalDay(now).getTime();
+  if (startMs >= start) return "Today";
+  return formatMonthDay(new Date(startMs));
+}
+
+export function formatAttentionRange(
+  startMs: number,
+  endMs: number,
+  now = Date.now(),
+): string {
+  const start = new Date(startMs);
+  const endDay = new Date(endMs - 1);
+  const sameDay =
+    start.getFullYear() === endDay.getFullYear() &&
+    start.getMonth() === endDay.getMonth() &&
+    start.getDate() === endDay.getDate();
+  if (sameDay) return formatDayLabel(startMs, now);
+  return `${formatMonthDay(start)}–${formatMonthDay(endDay)}`;
+}
+
 export function todayBoundsMs(): [number, number] {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());

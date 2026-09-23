@@ -9,7 +9,7 @@ export function AgentRow({ session }: AgentRowProps) {
   const showProject = session.project.name !== session.title;
 
   return (
-    <li className="agent-row">
+    <li className={`agent-row agent-row-${session.status}`}>
       <button
         type="button"
         className="agent-row-button"

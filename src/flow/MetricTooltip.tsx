@@ -13,9 +13,11 @@ type Position = { top: number; left: number; place: "below" | "above" };
 
 export function MetricTooltip({
   help,
+  compact = false,
   children,
 }: {
   help?: string;
+  compact?: boolean;
   children: ReactNode;
 }) {
   const id = useId();
@@ -81,7 +83,9 @@ export function MetricTooltip({
     <>
       <div
         ref={triggerRef}
-        className="flow-help-trigger"
+        className={
+          compact ? "flow-help-trigger flow-help-trigger-compact" : "flow-help-trigger"
+        }
         tabIndex={0}
         aria-describedby={open ? id : undefined}
         onMouseEnter={show}

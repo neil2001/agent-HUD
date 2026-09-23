@@ -1,6 +1,8 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import "./flow.css";
-import { formatDuration, formatPercent, formatTime, formatTurnsPerHour } from "./format";
+import { dayBoundsMs, formatDayLabel, formatDuration, formatPercent, formatTime } from "./format";
+import { AttentionView } from "./AttentionView";
 import { ContextRiver } from "./ContextRiver";
 import { METRIC_HELP } from "./metricHelp";
 import { MetricTooltip } from "./MetricTooltip";
@@ -22,42 +24,44 @@ export function FlowApp() {
     summary.turns === 0 &&
     (timeline?.entries.length ?? 0) === 0;
 
+  const todayTab = tab === "timeline" || tab === "focus" || tab === "agents";
+
   return (
     <div className="flow-app">
-      <header className="flow-header">
-        <h1>Agent Flow</h1>
-        <p>Flight recorder for human–agent work · today</p>
-      </header>
-      <nav className="flow-nav">
-        {(
-          [
-            ["overview", "Overview"],
-            ["timeline", "Timeline"],
-            ["focus", "Focus"],
-            ["agents", "Agents"],
-            ["prs", "PRs"],
-            ["privacy", "Privacy"],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            data-active={tab === id}
-            onClick={() => setTab(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      <aside className="flow-sidebar">
+        <header className="flow-header">
+          <h1>Agent Flow</h1>
+          <p>Flight recorder for human–agent work</p>
+        </header>
+        <nav className="flow-nav">
+          {(
+            [
+              ["overview", "Overview"],
+              ["timeline", "Timeline"],
+              ["focus", "Focus"],
+              ["agents", "Agents"],
+              ["prs", "PRs"],
+              ["privacy", "Privacy"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              data-active={tab === id}
+              onClick={() => setTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+      </aside>
       <main className="flow-main">
-        {error && tab !== "prs" && <p className="flow-error">{error}</p>}
-        {loading && tab !== "prs" && <p className="flow-empty">Loading…</p>}
-        {empty && tab !== "privacy" && tab !== "prs" && (
+        {error && todayTab && <p className="flow-error">{error}</p>}
+        {loading && todayTab && <p className="flow-empty">Loading…</p>}
+        {empty && todayTab && (
           <p className="flow-empty">No agent activity recorded today.</p>
         )}
-        {!loading && summary && timeline && tab === "overview" && !empty && (
-          <Overview summary={summary} timeline={timeline} />
-        )}
+        {tab === "overview" && <Overview />}
         {!loading && timeline && tab === "timeline" && !empty && (
           <TimelineView entries={timeline.entries} />
         )}
@@ -76,35 +80,80 @@ export function FlowApp() {
   );
 }
 
-function Overview({
-  summary,
-  timeline,
-}: {
-  summary: FlowSummary;
-  timeline: FlowTimeline;
-}) {
+function Overview() {
+  const [dayOffset, setDayOffset] = useState(0);
+  const [summary, setSummary] = useState<FlowSummary | null>(null);
+  const [timeline, setTimeline] = useState<FlowTimeline | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [startMs] = dayBoundsMs(dayOffset);
+  const dayLabel = formatDayLabel(startMs);
+  const riverHasMarks =
+    timeline != null &&
+    (timeline.river.lanes.length > 0 || timeline.river.agent_bands.length > 0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const [rangeStart, rangeEnd] = dayBoundsMs(dayOffset);
+    setLoading(true);
+    setError(null);
+    setSummary(null);
+    setTimeline(null);
+    Promise.all([
+      invoke<FlowSummary>("get_flow_summary", {
+        startMs: rangeStart,
+        endMs: rangeEnd,
+      }),
+      invoke<FlowTimeline>("get_flow_timeline", {
+        startMs: rangeStart,
+        endMs: rangeEnd,
+      }),
+    ])
+      .then(([nextSummary, nextTimeline]) => {
+        if (cancelled) return;
+        setSummary(nextSummary);
+        setTimeline(nextTimeline);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dayOffset]);
+
   return (
     <div className="flow-overview">
-      <ContextRiver river={timeline.river} />
-      <div className="flow-activity-row">
-        <ActivityFigure
-          label="Turns/hr"
-          value={formatTurnsPerHour(summary.turns_per_hour)}
-          help={METRIC_HELP.turnsPerHour}
+      <AttentionView />
+      {error && <p className="flow-error">{error}</p>}
+      {loading && !timeline && <p className="flow-empty">Loading…</p>}
+      {timeline && (
+        <ContextRiver
+          river={timeline.river}
+          dayLabel={dayLabel}
+          canGoForward={dayOffset > 0}
+          onPreviousDay={() => setDayOffset((current) => current + 1)}
+          onNextDay={() => setDayOffset((current) => Math.max(0, current - 1))}
         />
-        <ActivityFigure
-          label="Between turns"
-          value={
-            summary.mean_turn_gap_ms != null
-              ? formatDuration(summary.mean_turn_gap_ms)
-              : "—"
-          }
-          help={METRIC_HELP.meanTurnGap}
-        />
-      </div>
+      )}
+      {summary && riverHasMarks && (
+        <>
+          <div className="flow-activity-row">
+            <ActivityFigure
+              label="Between turns"
+              value={
+                summary.mean_turn_gap_ms != null
+                  ? formatDuration(summary.mean_turn_gap_ms)
+                  : "—"
+              }
+            />
+          </div>
 
-      <section className="flow-overview-section">
-        <SectionTitle help={METRIC_HELP.returnLatency}>The loop</SectionTitle>
+          <section className="flow-overview-section">
+        <h2 className="flow-section-title">The loop</h2>
         <p className="flow-loop-caption">
           How long until you get back after the agent finishes
         </p>
@@ -134,11 +183,9 @@ function Overview({
       <section className="flow-overview-section">
         <div className="flow-section-heading-row">
           <h2 className="flow-section-heading">Concurrency</h2>
-          <MetricTooltip help={METRIC_HELP.maxConcurrent}>
-            <span className="flow-section-meta">
-              max {summary.max_concurrent_agents}
-            </span>
-          </MetricTooltip>
+          <span className="flow-section-meta">
+            max {summary.max_concurrent_agents}
+          </span>
         </div>
         <ShareHistogram
           share={summary.concurrency_share}
@@ -147,9 +194,7 @@ function Overview({
       </section>
 
       <section className="flow-overview-section">
-        <SectionTitle help={METRIC_HELP.turnDurationSection}>
-          Turn duration
-        </SectionTitle>
+        <h2 className="flow-section-title">Turn duration</h2>
         <CountHistogram
           rows={[
             ["<30s", summary.turn_duration_buckets.under_30s],
@@ -160,6 +205,8 @@ function Overview({
           ]}
         />
       </section>
+        </>
+      )}
     </div>
   );
 }
@@ -174,12 +221,14 @@ function ActivityFigure({
   help?: string;
 }) {
   return (
-    <MetricTooltip help={help}>
-      <div className="flow-activity-figure">
-        <div className="flow-activity-label">{label}</div>
-        <div className="flow-activity-value">{value}</div>
+    <div className="flow-activity-figure">
+      <div className="flow-activity-label">
+        <MetricTooltip help={help} compact>
+          <span>{label}</span>
+        </MetricTooltip>
       </div>
-    </MetricTooltip>
+      <div className="flow-activity-value">{value}</div>
+    </div>
   );
 }
 
@@ -193,26 +242,14 @@ function Stat({
   help?: string;
 }) {
   return (
-    <MetricTooltip help={help}>
-      <div className="flow-stat">
-        <div className="flow-stat-label">{label}</div>
-        <div className="flow-stat-value">{value}</div>
+    <div className="flow-stat">
+      <div className="flow-stat-label">
+        <MetricTooltip help={help} compact>
+          <span>{label}</span>
+        </MetricTooltip>
       </div>
-    </MetricTooltip>
-  );
-}
-
-function SectionTitle({
-  children,
-  help,
-}: {
-  children: ReactNode;
-  help?: string;
-}) {
-  return (
-    <MetricTooltip help={help}>
-      <h2 className="flow-section-title">{children}</h2>
-    </MetricTooltip>
+      <div className="flow-stat-value">{value}</div>
+    </div>
   );
 }
 
@@ -223,34 +260,28 @@ function ShareHistogram({
   share: FlowSummary["concurrency_share"];
   wallClockMs: number;
 }) {
-  const rows = useMemo(
-    () =>
-      [
-        ["1", share.one, METRIC_HELP.concurrencyOne],
-        ["2", share.two, METRIC_HELP.concurrencyTwo],
-        ["3", share.three, METRIC_HELP.concurrencyThree],
-        ["4+", share.four_plus, METRIC_HELP.concurrencyFourPlus],
-      ] as const,
-    [share],
-  );
+  const rows = [
+    ["1", share.one],
+    ["2", share.two],
+    ["3", share.three],
+    ["4+", share.four_plus],
+  ] as const;
 
   return (
     <div className="flow-share-histogram">
-      {rows.map(([label, fraction, help]) => (
-        <MetricTooltip key={label} help={help}>
-          <div className="flow-bar-row flow-bar-row-wide">
-            <span>{label}</span>
-            <div className="flow-bar-track">
-              <div
-                className="flow-bar-fill"
-                style={{ width: `${Math.max(fraction * 100, 0)}%` }}
-              />
-            </div>
-            <span>
-              {formatPercent(fraction)} · {formatDuration(Math.round(fraction * wallClockMs))}
-            </span>
+      {rows.map(([label, fraction]) => (
+        <div className="flow-bar-row flow-bar-row-wide" key={label}>
+          <span>{label}</span>
+          <div className="flow-bar-track">
+            <div
+              className="flow-bar-fill"
+              style={{ width: `${Math.max(fraction * 100, 0)}%` }}
+            />
           </div>
-        </MetricTooltip>
+          <span>
+            {formatPercent(fraction)} · {formatDuration(Math.round(fraction * wallClockMs))}
+          </span>
+        </div>
       ))}
     </div>
   );

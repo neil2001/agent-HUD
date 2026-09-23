@@ -10,7 +10,10 @@ mod window;
 use std::sync::Arc;
 
 use daily::{current_usage, start_pr_poller, DailyUsage, OpenPrList, PrCache};
-use flow::metrics::{compute_summary, compute_timeline, FlowSummary, FlowTimeline};
+use flow::metrics::{
+    compute_attention, compute_summary, compute_timeline, AttentionReport, FlowSummary,
+    FlowTimeline,
+};
 use flow::{default_flow_db_path, FlowPipeline, FlowSettings, FlowStore};
 use flow_window::open_flow_window;
 use lifecycle::{init_autostart, setup_tray};
@@ -46,6 +49,19 @@ fn get_flow_summary(
         .query_range(start_ms, end_ms)
         .map_err(|e| e.to_string())?;
     Ok(compute_summary(&events, start_ms, end_ms))
+}
+
+#[tauri::command]
+fn get_attention(
+    flow: tauri::State<Arc<FlowPipeline>>,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<AttentionReport, String> {
+    let events = flow
+        .store()
+        .query_range(start_ms, end_ms)
+        .map_err(|e| e.to_string())?;
+    Ok(compute_attention(&events, start_ms, end_ms))
 }
 
 #[tauri::command]
@@ -170,6 +186,7 @@ pub fn run() {
         dismiss_session,
         get_flow_summary,
         get_flow_timeline,
+        get_attention,
         get_flow_settings,
         set_flow_settings,
         get_daily_usage,

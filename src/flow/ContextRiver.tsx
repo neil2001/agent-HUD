@@ -18,6 +18,7 @@ const ORPHAN_GAP = 10;
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const MIN_SPAN_MS = 2 * MINUTE_MS;
+const MIN_APP_FOCUS_MS = 30 * 1000;
 const SPAN_STEPS_MS = [
   2 * MINUTE_MS,
   5 * MINUTE_MS,
@@ -160,6 +161,44 @@ function formatHour(ts: number): string {
   });
 }
 
+function DayStepper({
+  dayLabel,
+  hours,
+  onPreviousDay,
+  onNextDay,
+  canGoForward,
+}: {
+  dayLabel: string;
+  hours?: string;
+  onPreviousDay?: () => void;
+  onNextDay?: () => void;
+  canGoForward: boolean;
+}) {
+  return (
+    <div className="flow-range flow-range-stepper" role="group" aria-label="Day">
+      {onPreviousDay && (
+        <button type="button" aria-label="Previous day" onClick={onPreviousDay}>
+          ‹
+        </button>
+      )}
+      <p className="flow-river-caption">
+        {dayLabel}
+        {hours ? ` · ${hours}` : ""}
+      </p>
+      {onNextDay && (
+        <button
+          type="button"
+          aria-label="Next day"
+          disabled={!canGoForward}
+          onClick={onNextDay}
+        >
+          ›
+        </button>
+      )}
+    </div>
+  );
+}
+
 function formatBarStart(ts: number, viewSpan: number): string {
   const options: Intl.DateTimeFormatOptions =
     viewSpan <= SECOND_PRECISION_SPAN_MS
@@ -194,6 +233,19 @@ function clipInterval(
   const clippedEnd = Math.min(end, viewEnd);
   if (clippedEnd <= clippedStart) return null;
   return { start: clippedStart, end: clippedEnd };
+}
+
+function focusedMs(segments: RiverSegment[], viewStart: number, viewEnd: number): number {
+  let total = 0;
+  for (const segment of segments) {
+    const visible = clipInterval(segment.start_ms, segment.end_ms, viewStart, viewEnd);
+    if (visible) total += visible.end - visible.start;
+  }
+  return total;
+}
+
+function lanesInPeriod(lanes: RiverLane[], viewStart: number, viewEnd: number): RiverLane[] {
+  return lanes.filter((lane) => focusedMs(lane.segments, viewStart, viewEnd) > MIN_APP_FOCUS_MS);
 }
 
 function visibleBands(bands: RiverAgentBand[], viewStart: number, viewEnd: number): RiverAgentBand[] {
@@ -400,7 +452,19 @@ function placeTip(tip: BarTip, width: number, height: number): { top: number; le
   return { top, left };
 }
 
-export function ContextRiver({ river }: { river: FlowRiver }) {
+export function ContextRiver({
+  river,
+  dayLabel = "Today",
+  onPreviousDay,
+  onNextDay,
+  canGoForward = false,
+}: {
+  river: FlowRiver;
+  dayLabel?: string;
+  onPreviousDay?: () => void;
+  onNextDay?: () => void;
+  canGoForward?: boolean;
+}) {
   const svgRef = useRef<SVGSVGElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef(defaultRiverView(river.range_start_ms, river.range_end_ms));
@@ -475,14 +539,30 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
   };
 
   if (river.lanes.length === 0 && river.agent_bands.length === 0) {
-    return null;
+    return (
+      <div className="flow-river-wrap">
+        <div className="flow-river-caption-row">
+          <DayStepper
+            dayLabel={dayLabel}
+            onPreviousDay={onPreviousDay}
+            onNextDay={onNextDay}
+            canGoForward={canGoForward}
+          />
+        </div>
+        <p className="flow-empty">No activity recorded this day.</p>
+      </div>
+    );
   }
 
   const { start, end } = view;
-  const layout = layoutRiver(river.lanes, river.agent_bands, start, end);
+  const periodLanes = lanesInPeriod(river.lanes, start, end);
+  if (periodLanes.length === 0 && river.agent_bands.length === 0) {
+    return null;
+  }
+  const layout = layoutRiver(periodLanes, river.agent_bands, start, end);
   const tickList = ticksFor(start, end);
   const viewSpan = end - start;
-  const cursorIndex = river.lanes.findIndex((lane) => lane.is_cursor);
+  const cursorIndex = periodLanes.findIndex((lane) => lane.is_cursor);
   const nestBands = cursorIndex >= 0 && layout.visibleBands.length > 0;
 
   const panTo = (clientX: number) => {
@@ -511,9 +591,13 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
   return (
     <div className="flow-river-wrap">
       <div className="flow-river-caption-row">
-        <p className="flow-river-caption">
-          Today · {formatHour(start)}–{formatHour(end)}
-        </p>
+        <DayStepper
+          dayLabel={dayLabel}
+          hours={`${formatHour(start)}–${formatHour(end)}`}
+          onPreviousDay={onPreviousDay}
+          onNextDay={onNextDay}
+          canGoForward={canGoForward}
+        />
         <div className="flow-river-zoom">
           <button type="button" aria-label="Zoom out" onClick={() => zoomBy(false)}>
             −
@@ -557,7 +641,7 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
             {formatTick(tick, tickStep(viewSpan))}
           </text>
         ))}
-        {river.lanes.map((lane, index) => {
+        {periodLanes.map((lane, index) => {
           const top = layout.laneTops[index];
           const segmentClass = lane.is_cursor
             ? "flow-river-segment flow-river-segment-cursor"

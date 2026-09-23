@@ -1,7 +1,9 @@
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-const FLOW_WIDTH: f64 = 960.0;
-const FLOW_HEIGHT: f64 = 640.0;
+const FLOW_WIDTH: f64 = 1280.0;
+const FLOW_HEIGHT: f64 = 800.0;
+const FLOW_MIN_WIDTH: f64 = 1100.0;
+const FLOW_MIN_HEIGHT: f64 = 680.0;
 
 pub fn open_flow_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("flow") {
@@ -14,6 +16,7 @@ pub fn open_flow_window(app: &AppHandle) -> Result<(), String> {
     let window = WebviewWindowBuilder::new(app, "flow", WebviewUrl::App("index.html".into()))
         .title("Agent Flow")
         .inner_size(FLOW_WIDTH, FLOW_HEIGHT)
+        .min_inner_size(FLOW_MIN_WIDTH, FLOW_MIN_HEIGHT)
         .resizable(true)
         .decorations(true)
         .always_on_top(false)

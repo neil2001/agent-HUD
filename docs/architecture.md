@@ -82,6 +82,8 @@ A **session** is one Cursor chat: every `turn_started` with that `session_id`. A
 
 The river is the same fold, drawn rather than counted. See [layout.md](layout.md).
 
+`get_attention` uses the same events over 7, 14, or 30 days. It returns frontmost time ranked by app, with Cursor chats and Chrome tabs nested under those apps, plus the session, turn, and runtime totals for that window.
+
 Return latency is the time from a finished turn until focus comes back to Cursor, unless another turn in that session starts first. Coming back while a turn is still open is a premature check, not a return.
 
 Pull-request opened and merged counts on the HUD come from a separate poller ([`daily.rs`](../src-tauri/src/daily.rs)), cached in memory, and are not stored in the flow database.
@@ -99,6 +101,7 @@ The webview talks to Rust only through Tauri commands:
 | `open_flow` | HUD overflow button and tray |
 | `get_flow_summary` | Agent Flow overview |
 | `get_flow_timeline` | Agent Flow river, timeline, focus, agents |
+| `get_attention` | Agent Flow overview, attention chart |
 | `get_flow_settings` / `set_flow_settings` | Privacy tab |
 
 The HUD listens for `sessions-changed` and `daily-usage-changed`. Agent Flow refetches on an interval from [`src/flow/useFlowData.ts`](../src/flow/useFlowData.ts).
