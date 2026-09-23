@@ -1,3 +1,4 @@
+mod daily;
 mod focus;
 pub mod flow;
 mod lifecycle;
@@ -8,8 +9,10 @@ mod window;
 
 use std::sync::Arc;
 
+use daily::{current_usage, start_pr_poller, DailyUsage, PrCache};
 use flow::metrics::{compute_summary, compute_timeline, FlowSummary, FlowTimeline};
 use flow::{default_flow_db_path, FlowPipeline, FlowSettings, FlowStore};
+use flow_window::open_flow_window;
 use lifecycle::{init_autostart, setup_tray};
 use sessions::aggregator;
 use state::AppState;
@@ -72,6 +75,19 @@ fn set_flow_settings(
 }
 
 #[tauri::command]
+fn get_daily_usage(
+    flow: tauri::State<Arc<FlowPipeline>>,
+    prs: tauri::State<Arc<PrCache>>,
+) -> DailyUsage {
+    current_usage(flow.store(), prs.inner())
+}
+
+#[tauri::command]
+fn open_flow(app: tauri::AppHandle) -> Result<(), String> {
+    open_flow_window(&app)
+}
+
+#[tauri::command]
 fn dismiss_session(
     app: tauri::AppHandle,
     state: tauri::State<Arc<AppState>>,
@@ -116,7 +132,9 @@ pub fn run() {
                 None => Arc::new(FlowStore::open_in_memory().expect("flow in-memory store")),
             };
             let flow = Arc::new(FlowPipeline::new(flow_store));
+            let pr_cache = Arc::new(PrCache::new());
             app.manage(flow.clone());
+            app.manage(pr_cache.clone());
 
             #[cfg(target_os = "macos")]
             if let Err(err) = window::create_hud_window(app.handle()) {
@@ -133,8 +151,10 @@ pub fn run() {
             aggregator::start(
                 app.handle().clone(),
                 app.state::<Arc<AppState>>().inner().clone(),
-                flow,
+                flow.clone(),
+                pr_cache.clone(),
             );
+            start_pr_poller(app.handle().clone(), flow, pr_cache);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -144,7 +164,9 @@ pub fn run() {
             get_flow_summary,
             get_flow_timeline,
             get_flow_settings,
-            set_flow_settings
+            set_flow_settings,
+            get_daily_usage,
+            open_flow
         ]);
 
     init_autostart(builder)

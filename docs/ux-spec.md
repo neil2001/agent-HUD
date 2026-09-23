@@ -2,86 +2,75 @@
 
 ## 1. UX Philosophy
 
-The HUD is a minimal, ephemeral status surface for active coding agents.
+The HUD is a minimal status surface that stays on screen.
 
-It should answer exactly two questions:
+It should answer three questions:
 
-1. **What agents are currently active?**
-2. **Where can I click to return to one?**
+1. **How has agent work gone today?** Agent tabs prompted, completed turns, and pull requests opened or merged.
+2. **What agents are currently active?**
+3. **Where can I click to return to one?**
 
-It should not behave like a dashboard, application window, or agent management interface.
+It should not behave like a dashboard, application window, or agent management interface. The daily usage strip is one compact row, not a statistics page.
 
 The desired interaction is:
 
 ```text
+HUD is already visible
+    ↓
 Agent starts
     ↓
-HUD appears
-    ↓
-User sees active agents
+A session row appears
     ↓
 User clicks one
     ↓
 Correct terminal/application is focused
 ```
 
-When there are no active agent sessions, the HUD should not be visible.
+When there are no active agent sessions, the session list is empty and the daily strip remains.
 
 ---
 
 # 2. Visibility
 
-The HUD should only exist visibly while there is at least one active agent session.
+The HUD window stays visible, including when no agent session is active.
 
 ```text
-active_sessions.count > 0
+HUD process running
         │
-        ├── YES → show HUD
-        │
-        └── NO  → hide HUD
+        └── window visible
+              ├── daily usage strip (always)
+              └── session rows while agents are active
 ```
 
 This is a core product requirement.
 
 ## Agent starts
 
-When the first active agent session is detected:
-
-```text
-No active agents
-      ↓
-Agent detected
-      ↓
-HUD becomes visible
-```
-
-The HUD should appear automatically without requiring the user to manually open it.
+When an agent session is detected, a session row appears under the daily strip. The window is already visible; the user does not open it.
 
 ## Agent exits
 
-When the final active agent session disappears:
+When a session ends, its row leaves the list. The daily strip remains.
 
-```text
-One active agent
-      ↓
-Agent exits
-      ↓
-No active agents
-      ↓
-HUD disappears
-```
+The application itself should continue running in the background so that it can keep recording usage and detect a new agent later.
 
-The application itself should continue running in the background so that it can detect a new agent later.
-
-The process should not terminate simply because the HUD is hidden.
+The process should not terminate when there are no active sessions.
 
 ---
 
 # 3. HUD Contents
 
-The HUD should contain only a list of active agent sessions.
+The HUD contains a daily usage strip and, while agents are active, a list of those sessions.
 
-Each row should communicate:
+The strip shows, for the local calendar day:
+
+- Sessions: agent tabs prompted today, each tab once (same count as Agent Flow)
+- Turns: completed cycles today (same count as Agent Flow)
+- Pull requests opened
+- Pull requests merged
+- An open icon that opens Agent Flow
+
+Each session row should communicate:
 
 - Agent type
 - Project/session identifier sufficient to distinguish sessions
@@ -105,7 +94,6 @@ There should be no requirement for:
 - sidebar
 - tabs
 - dashboard cards
-- statistics
 - detailed session information
 - configuration controls
 - agent controls
@@ -444,37 +432,33 @@ Conceptually:
 ```typescript
 function App() {
     const sessions = useSessions();
-
-    if (sessions.length === 0) {
-        return null;
-    }
+    const usage = useDailyUsage();
 
     return (
-        <AgentList sessions={sessions} />
+        <>
+            <DailyStrip usage={usage} />
+            {sessions.length > 0 ? <AgentList sessions={sessions} /> : null}
+        </>
     );
 }
 ```
 
-However, HUD window visibility should preferably be controlled by the native/Tauri layer rather than relying solely on React rendering an empty window.
-
-The desired architecture is:
+Window visibility is controlled by the native/Tauri layer. The window stays shown. Its height tracks the session count, with the daily strip always included.
 
 ```text
 Rust aggregator
        │
-       │ active session count
+       │ active session count + daily usage
        ▼
 Tauri window manager
        │
-       ├── 0 sessions → hide
-       │
-       └── >0 sessions → show
-                         │
-                         ▼
-                       React
+       └── always show
+             │
+             ▼
+           React
+             ├── daily strip
+             └── session rows when count > 0
 ```
-
-This means that when there are no agents, the actual window is hidden rather than merely rendering an empty React application.
 
 ---
 
@@ -484,8 +468,7 @@ Animations should be minimal.
 
 Optional:
 
-- short fade/scale when HUD appears
-- short fade when HUD disappears
+- short fade/scale when a session row appears
 - subtle row transition when status changes
 
 Do not let animations delay interaction.
@@ -503,7 +486,11 @@ The UX is complete when:
 ```text
 No active Cursor agents
         ↓
-HUD is completely invisible
+HUD stays visible
+        ↓
+Daily strip shows today's counts
+        ↓
+Session list is empty
 ```
 
 ### First agent starts
@@ -511,9 +498,7 @@ HUD is completely invisible
 ```text
 Cursor agent starts
         ↓
-HUD automatically appears
-        ↓
-One row is displayed
+One session row appears under the daily strip
 ```
 
 ### Multiple agents
@@ -545,37 +530,42 @@ Correct underlying session is focused
 ```text
 Last active agent exits
         ↓
-HUD automatically disappears
+Session list clears
+        ↓
+Daily strip remains
 ```
 
 ### New agent later
 
 ```text
-HUD hidden
+HUD still visible
         ↓
 New Cursor agent starts
         ↓
-HUD automatically reappears
+Session row appears
 ```
 
 ---
 
 # 18. Product Principle
 
-The HUD should be almost invisible when it is not useful.
+The HUD should stay out of the way without going away.
 
-It should appear when there is agent work happening, provide an instantaneous overview, and disappear when there is nothing to monitor.
+It should remain visible with today's usage, grow a session row when agent work is happening, and drop that row when the session ends.
 
 The ideal experience is:
 
 ```text
+                 ┌─────────────┐
+                 │ HUD stays up │
+                 └──────┬──────┘
+                        │
+                 daily usage strip
+                        │
+                        ▼
                     Agent work
                         │
                         ▼
-                 ┌─────────────┐
-                 │  HUD appears │
-                 └──────┬──────┘
-                        │
                  see active agents
                         │
                         ▼
@@ -588,9 +578,7 @@ The ideal experience is:
                  agents finish
                         │
                         ▼
-                 ┌─────────────┐
-                 │ HUD vanishes │
-                 └─────────────┘
+                 session rows clear
 ```
 
 The HUD should never become another application the user feels responsible for managing.

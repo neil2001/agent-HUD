@@ -265,10 +265,41 @@ body,
   margin-bottom: 8px;
 }
 
-.flow-river-caption {
+.flow-river-caption-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin: 0 0 8px;
+}
+
+.flow-river-caption {
+  margin: 0;
   font-size: 12px;
   color: var(--flow-muted);
+}
+
+.flow-river-zoom {
+  display: flex;
+  gap: 4px;
+}
+
+.flow-river-zoom button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--flow-border);
+  border-radius: 6px;
+  background: var(--flow-surface);
+  color: var(--flow-text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.flow-river-zoom button:hover {
+  border-color: rgba(255, 255, 255, 0.24);
 }
 
 .flow-river {
@@ -342,6 +373,10 @@ body,
   margin-bottom: 8px;
   font-size: 12px;
   color: var(--flow-muted);
+}
+
+.flow-bar-row-wide {
+  grid-template-columns: 72px 1fr 132px;
 }
 
 .flow-bar-track {

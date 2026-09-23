@@ -152,7 +152,10 @@ function Overview({
             </span>
           </MetricTooltip>
         </div>
-        <ShareHistogram share={summary.concurrency_share} />
+        <ShareHistogram
+          share={summary.concurrency_share}
+          wallClockMs={summary.wall_clock_agent_ms}
+        />
       </section>
 
       <section className="flow-overview-section">
@@ -217,7 +220,13 @@ function SectionTitle({
   );
 }
 
-function ShareHistogram({ share }: { share: FlowSummary["concurrency_share"] }) {
+function ShareHistogram({
+  share,
+  wallClockMs,
+}: {
+  share: FlowSummary["concurrency_share"];
+  wallClockMs: number;
+}) {
   const rows = useMemo(
     () =>
       [
@@ -233,7 +242,7 @@ function ShareHistogram({ share }: { share: FlowSummary["concurrency_share"] }) 
     <div className="flow-share-histogram">
       {rows.map(([label, fraction, help]) => (
         <MetricTooltip key={label} help={help}>
-          <div className="flow-bar-row">
+          <div className="flow-bar-row flow-bar-row-wide">
             <span>{label}</span>
             <div className="flow-bar-track">
               <div
@@ -241,7 +250,9 @@ function ShareHistogram({ share }: { share: FlowSummary["concurrency_share"] }) 
                 style={{ width: `${Math.max(fraction * 100, 0)}%` }}
               />
             </div>
-            <span>{formatPercent(fraction)}</span>
+            <span>
+              {formatPercent(fraction)} · {formatDuration(Math.round(fraction * wallClockMs))}
+            </span>
           </div>
         </MetricTooltip>
       ))}

@@ -1,14 +1,16 @@
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Size};
 
-pub const HUD_WIDTH: f64 = 280.0;
+pub const HUD_WIDTH: f64 = 268.0;
+pub const HUD_CORNER_RADIUS: f64 = 12.0;
 pub const HUD_HANDLE_HEIGHT: f64 = 5.0;
+pub const HUD_METRICS_HEIGHT: f64 = 28.0;
 pub const HUD_ROW_HEIGHT: f64 = 22.0;
 pub const HUD_PADDING: f64 = 10.0;
 pub const HUD_MAX_VISIBLE_ROWS: usize = 8;
 
 pub fn height_for_session_count(count: usize) -> f64 {
-    let rows = count.clamp(1, HUD_MAX_VISIBLE_ROWS);
-    HUD_HANDLE_HEIGHT + rows as f64 * HUD_ROW_HEIGHT + HUD_PADDING
+    let rows = count.min(HUD_MAX_VISIBLE_ROWS);
+    HUD_HANDLE_HEIGHT + HUD_METRICS_HEIGHT + rows as f64 * HUD_ROW_HEIGHT + HUD_PADDING
 }
 
 #[cfg(target_os = "macos")]
@@ -31,7 +33,7 @@ mod macos {
     pub fn create_hud_window(app: &AppHandle) -> Result<(), String> {
         let window = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
             .title("agent-HUD")
-            .inner_size(HUD_WIDTH, height_for_session_count(1))
+            .inner_size(HUD_WIDTH, height_for_session_count(0))
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -53,10 +55,12 @@ mod macos {
         match window.to_panel::<HudPanel>() {
             Ok(panel) => {
                 panel.set_level(PanelLevel::Status.value());
+                // Borderless so AppKit does not paint a square HUD bezel
+                // around the rounded panel.
                 panel.set_style_mask(
                     StyleMask::empty()
+                        .borderless()
                         .nonactivating_panel()
-                        .hud_window()
                         .into(),
                 );
                 panel.set_collection_behavior(
@@ -75,6 +79,8 @@ mod macos {
         }
 
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        clip_to_hud_radius(&window);
+        sync_visibility(app, 0);
 
         Ok(())
     }
@@ -105,8 +111,27 @@ mod macos {
 
     fn apply_vibrancy(window: &WebviewWindow) -> Result<(), String> {
         use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-        apply_vibrancy(window, NSVisualEffectMaterial::HudWindow, None, Some(12.0))
-            .map_err(|e| e.to_string())
+        apply_vibrancy(
+            window,
+            NSVisualEffectMaterial::HudWindow,
+            None,
+            Some(HUD_CORNER_RADIUS),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn clip_to_hud_radius(window: &WebviewWindow) {
+        let Ok(view_ptr) = window.ns_view() else {
+            return;
+        };
+        unsafe {
+            let view: &objc2_app_kit::NSView = &*view_ptr.cast();
+            view.setWantsLayer(true);
+            if let Some(layer) = view.layer() {
+                layer.setCornerRadius(HUD_CORNER_RADIUS);
+                layer.setMasksToBounds(true);
+            }
+        }
     }
 
     fn position_top_center(window: &WebviewWindow) -> Result<(), String> {
@@ -115,7 +140,7 @@ mod macos {
             let size = monitor.size();
             let window_size = window
                 .outer_size()
-                .unwrap_or_else(|_| tauri::PhysicalSize::new(280, 120));
+                .unwrap_or_else(|_| tauri::PhysicalSize::new(HUD_WIDTH as u32, 120));
             let logical_w = window_size.width as f64 / scale;
             let screen_w = size.width as f64 / scale;
             let x = (screen_w - logical_w) / 2.0;
@@ -126,15 +151,6 @@ mod macos {
     }
 
     pub fn sync_visibility(app: &AppHandle, session_count: usize) {
-        if session_count == 0 {
-            if let Ok(panel) = app.get_webview_panel("main") {
-                panel.hide();
-            } else if let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
-            }
-            return;
-        }
-
         if let Some(window) = app.get_webview_window("main") {
             let height = height_for_session_count(session_count);
             let _ = window.set_size(Size::Logical(LogicalSize::new(HUD_WIDTH, height)));
@@ -143,6 +159,7 @@ mod macos {
 
         // Never call window.show() — Tauri's show activates and steals Cursor's focus.
         // Panel::show is orderFrontRegardless on a nonactivating NSPanel.
+        // The panel stays visible even when no agent sessions are active.
         if let Ok(panel) = app.get_webview_panel("main") {
             if !panel.is_visible() {
                 panel.show();
@@ -159,27 +176,44 @@ mod macos {
     pub fn create_hud_window(app: &AppHandle) -> Result<(), String> {
         tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
             .title("agent-HUD")
-            .inner_size(HUD_WIDTH, height_for_session_count(1))
+            .inner_size(HUD_WIDTH, height_for_session_count(0))
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
             .visible(false)
             .build()
             .map_err(|e| e.to_string())?;
+        sync_visibility(app, 0);
         Ok(())
     }
 
     pub fn sync_visibility(app: &AppHandle, session_count: usize) {
         if let Some(window) = app.get_webview_window("main") {
-            if session_count == 0 {
-                let _ = window.hide();
-            } else {
-                let height = height_for_session_count(session_count);
-                let _ = window.set_size(Size::Logical(LogicalSize::new(HUD_WIDTH, height)));
-                let _ = window.show();
-            }
+            let height = height_for_session_count(session_count);
+            let _ = window.set_size(Size::Logical(LogicalSize::new(HUD_WIDTH, height)));
+            let _ = window.show();
         }
     }
 }
 
 pub use macos::{create_hud_window, sync_visibility};
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        height_for_session_count, HUD_HANDLE_HEIGHT, HUD_MAX_VISIBLE_ROWS, HUD_METRICS_HEIGHT,
+        HUD_PADDING, HUD_ROW_HEIGHT,
+    };
+
+    #[test]
+    fn height_is_metrics_band_when_empty_and_grows_by_one_row() {
+        let empty = HUD_HANDLE_HEIGHT + HUD_METRICS_HEIGHT + HUD_PADDING;
+        assert_eq!(height_for_session_count(0), empty);
+        assert_eq!(height_for_session_count(1), empty + HUD_ROW_HEIGHT);
+        assert_eq!(height_for_session_count(3), empty + 3.0 * HUD_ROW_HEIGHT);
+        assert_eq!(
+            height_for_session_count(100),
+            empty + HUD_MAX_VISIBLE_ROWS as f64 * HUD_ROW_HEIGHT
+        );
+    }
+}

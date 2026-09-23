@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { createPortal } from "react-dom";
 import { formatDuration } from "./format";
-import type { FlowRiver } from "./types";
+import type { FlowRiver, RiverAgentBand, RiverSegment } from "./types";
 
 const PLOT_LEFT = 176;
 const PLOT_RIGHT = 952;
@@ -49,6 +50,36 @@ function formatHour(ts: number): string {
   });
 }
 
+function cursorSegmentText(segment: RiverSegment, bands: RiverAgentBand[]): string {
+  const duration = formatDuration(segment.end_ms - segment.start_ms);
+  const labels = [
+    ...new Set(
+      bands
+        .filter((band) =>
+          band.pieces.some(
+            (piece) => piece.start_ms < segment.end_ms && piece.end_ms > segment.start_ms,
+          ),
+        )
+        .map((band) => band.label),
+    ),
+  ];
+  if (labels.length === 0) return `Cursor · ${duration}`;
+  return `${labels.join(", ")} · ${duration}`;
+}
+
+function showBarTip(
+  event: MouseEvent<SVGRectElement>,
+  text: string,
+  setTip: (tip: { text: string; top: number; left: number } | null) => void,
+) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  setTip({
+    text,
+    top: rect.bottom + 8,
+    left: Math.max(12, Math.min(rect.left, window.innerWidth - 280)),
+  });
+}
+
 function clipInterval(
   start: number,
   end: number,
@@ -70,6 +101,7 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
     end: river.range_end_ms,
   });
   const [dragging, setDragging] = useState(false);
+  const [tip, setTip] = useState<{ text: string; top: number; left: number } | null>(null);
 
   useEffect(() => {
     const next = { start: river.range_start_ms, end: river.range_end_ms };
@@ -81,42 +113,27 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
     viewRef.current = view;
   }, [view]);
 
-  useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const current = viewRef.current;
-      const span = current.end - current.start;
-      const full = river.range_end_ms - river.range_start_ms;
-      if (full <= 0) return;
-
-      const rect = svg.getBoundingClientRect();
-      const pointer = (event.clientX - rect.left) / rect.width;
-      const plotRatio = (pointer * 960 - PLOT_LEFT) / (PLOT_RIGHT - PLOT_LEFT);
-      const anchorRatio = Math.min(1, Math.max(0, plotRatio));
-      const zoom = event.deltaY > 0 ? 1.2 : 1 / 1.2;
-      const nextSpan = Math.max(MIN_SPAN_MS, Math.min(full, span * zoom));
-      const anchor = current.start + anchorRatio * span;
-      let nextStart = anchor - anchorRatio * nextSpan;
-      let nextEnd = nextStart + nextSpan;
-      if (nextStart < river.range_start_ms) {
-        nextStart = river.range_start_ms;
-        nextEnd = Math.min(river.range_end_ms, nextStart + nextSpan);
-      }
-      if (nextEnd > river.range_end_ms) {
-        nextEnd = river.range_end_ms;
-        nextStart = Math.max(river.range_start_ms, nextEnd - nextSpan);
-      }
-      const next = { start: nextStart, end: nextEnd };
-      viewRef.current = next;
-      setView(next);
-    };
-
-    svg.addEventListener("wheel", onWheel, { passive: false });
-    return () => svg.removeEventListener("wheel", onWheel);
-  }, [river.range_start_ms, river.range_end_ms]);
+  const zoomBy = (factor: number) => {
+    const current = viewRef.current;
+    const span = current.end - current.start;
+    const full = river.range_end_ms - river.range_start_ms;
+    if (full <= 0 || span <= 0) return;
+    const nextSpan = Math.max(MIN_SPAN_MS, Math.min(full, span * factor));
+    const anchor = current.start + span / 2;
+    let nextStart = anchor - nextSpan / 2;
+    let nextEnd = nextStart + nextSpan;
+    if (nextStart < river.range_start_ms) {
+      nextStart = river.range_start_ms;
+      nextEnd = Math.min(river.range_end_ms, nextStart + nextSpan);
+    }
+    if (nextEnd > river.range_end_ms) {
+      nextEnd = river.range_end_ms;
+      nextStart = Math.max(river.range_start_ms, nextEnd - nextSpan);
+    }
+    const next = { start: nextStart, end: nextEnd };
+    viewRef.current = next;
+    setView(next);
+  };
 
   if (river.lanes.length === 0 && river.agent_bands.length === 0) {
     return null;
@@ -158,9 +175,19 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
 
   return (
     <div className="flow-river-wrap">
-      <p className="flow-river-caption">
-        Today · {formatHour(start)}–{formatHour(end)}
-      </p>
+      <div className="flow-river-caption-row">
+        <p className="flow-river-caption">
+          Today · {formatHour(start)}–{formatHour(end)}
+        </p>
+        <div className="flow-river-zoom">
+          <button type="button" aria-label="Zoom out" onClick={() => zoomBy(1.25)}>
+            −
+          </button>
+          <button type="button" aria-label="Zoom in" onClick={() => zoomBy(0.8)}>
+            +
+          </button>
+        </div>
+      </div>
       <svg
         ref={svgRef}
         className={dragging ? "flow-river flow-river-dragging" : "flow-river"}
@@ -221,11 +248,18 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
                     width={width}
                     height={8}
                     rx={2}
-                  >
-                    <title>
-                      {lane.app_name} · {formatDuration(segment.end_ms - segment.start_ms)}
-                    </title>
-                  </rect>
+                    onMouseEnter={
+                      lane.is_cursor
+                        ? (event) =>
+                            showBarTip(
+                              event,
+                              cursorSegmentText(segment, river.agent_bands),
+                              setTip,
+                            )
+                        : undefined
+                    }
+                    onMouseLeave={lane.is_cursor ? () => setTip(null) : undefined}
+                  />
                 );
               })}
             </g>
@@ -261,12 +295,15 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
                     width={width}
                     height={bar}
                     rx={1}
-                  >
-                    <title>
-                      {band.label} · {formatDuration(piece.end_ms - piece.start_ms)}
-                      {piece.autonomous ? " · away" : ""}
-                    </title>
-                  </rect>
+                    onMouseEnter={(event) =>
+                      showBarTip(
+                        event,
+                        `${band.label} · ${formatDuration(piece.end_ms - piece.start_ms)}${piece.autonomous ? " · away" : ""}`,
+                        setTip,
+                      )
+                    }
+                    onMouseLeave={() => setTip(null)}
+                  />
                 );
               })}
               {showCheck && checkX + 6 <= PLOT_RIGHT && (
@@ -300,6 +337,13 @@ export function ContextRiver({ river }: { river: FlowRiver }) {
             );
           })}
       </svg>
+      {tip &&
+        createPortal(
+          <div className="flow-tooltip" style={{ top: tip.top, left: tip.left, visibility: "visible", opacity: 1 }} role="tooltip">
+            {tip.text}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

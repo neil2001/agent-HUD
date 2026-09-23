@@ -1,18 +1,18 @@
 import { AgentList } from "./components/AgentList";
+import { DailyStrip } from "./components/DailyStrip";
+import { useDailyUsage } from "./hooks/useDailyUsage";
 import { useSessions } from "./hooks/useSessions";
 import "./styles.css";
 
 function App() {
   const sessions = useSessions();
-
-  if (sessions.length === 0) {
-    return null;
-  }
+  const usage = useDailyUsage();
 
   return (
     <div className="hud-root">
       <div className="hud-drag-handle" data-tauri-drag-region />
-      <AgentList sessions={sessions} />
+      <DailyStrip usage={usage} divided={sessions.length > 0} />
+      {sessions.length > 0 ? <AgentList sessions={sessions} /> : null}
     </div>
   );
 }

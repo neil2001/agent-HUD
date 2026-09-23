@@ -106,6 +106,39 @@ impl FlowStore {
         Ok(())
     }
 
+    pub fn count_event_type_in_range(
+        &self,
+        event_type: FlowEventType,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<u64, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE type = ?1 AND timestamp >= ?2 AND timestamp < ?3",
+            params![event_type_to_str(event_type), start_ms, end_ms],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Distinct sessions with a prompt in range. Same definition as the Agent Flow overview.
+    pub fn count_prompted_sessions(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<u64, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM events
+             WHERE type = ?1 AND timestamp >= ?2 AND timestamp < ?3
+               AND session_id IS NOT NULL",
+            params![event_type_to_str(FlowEventType::TurnStarted), start_ms, end_ms],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
     pub fn query_range(&self, start_ms: i64, end_ms: i64) -> Result<Vec<FlowEvent>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -287,6 +320,101 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].timestamp, 1000);
         assert_eq!(events[2].timestamp, 3000);
+    }
+
+    #[test]
+    fn count_event_type_in_range_filters_type_and_window() {
+        let store = FlowStore::open_in_memory().unwrap();
+        store.append(&sample_event(1_000, "turn-in")).unwrap();
+        store
+            .append(&FlowEvent {
+                id: "id-session-in".to_string(),
+                timestamp: 1_500,
+                source: FlowSource::Cursor,
+                event_type: FlowEventType::SessionStarted,
+                session_id: Some("s1".to_string()),
+                turn_id: None,
+                payload: json!({}),
+            })
+            .unwrap();
+        store
+            .append(&FlowEvent {
+                id: "id-finished-in".to_string(),
+                timestamp: 1_200,
+                source: FlowSource::Cursor,
+                event_type: FlowEventType::TurnFinished,
+                session_id: Some("s1".to_string()),
+                turn_id: Some("s1:1".to_string()),
+                payload: json!({}),
+            })
+            .unwrap();
+        store.append(&sample_event(2_500, "turn-out")).unwrap();
+
+        assert_eq!(
+            store
+                .count_event_type_in_range(FlowEventType::TurnStarted, 0, 2_000)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_event_type_in_range(FlowEventType::SessionStarted, 0, 2_000)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_event_type_in_range(FlowEventType::TurnFinished, 0, 2_000)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_event_type_in_range(FlowEventType::TurnStarted, 0, 1_000)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn prompted_sessions_count_each_tab_once() {
+        let store = FlowStore::open_in_memory().unwrap();
+        store
+            .append(&FlowEvent {
+                id: "id-session-only".to_string(),
+                timestamp: 500,
+                source: FlowSource::Cursor,
+                event_type: FlowEventType::SessionStarted,
+                session_id: Some("s-unprompted".to_string()),
+                turn_id: None,
+                payload: json!({}),
+            })
+            .unwrap();
+        store.append(&sample_event(1_000, "s1-a")).unwrap();
+        store
+            .append(&FlowEvent {
+                id: "id-s1-b".to_string(),
+                timestamp: 1_500,
+                source: FlowSource::Cursor,
+                event_type: FlowEventType::TurnStarted,
+                session_id: Some("s1".to_string()),
+                turn_id: Some("s1:2".to_string()),
+                payload: json!({}),
+            })
+            .unwrap();
+        store
+            .append(&FlowEvent {
+                id: "id-s2".to_string(),
+                timestamp: 1_800,
+                source: FlowSource::Cursor,
+                event_type: FlowEventType::TurnStarted,
+                session_id: Some("s2".to_string()),
+                turn_id: Some("s2:1".to_string()),
+                payload: json!({}),
+            })
+            .unwrap();
+
+        assert_eq!(store.count_prompted_sessions(0, 2_000).unwrap(), 2);
     }
 
     #[test]

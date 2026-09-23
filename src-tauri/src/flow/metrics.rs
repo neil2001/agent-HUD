@@ -155,9 +155,11 @@ pub fn compute_summary(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flow
         .count() as u64;
     let sessions = events
         .iter()
-        .filter(|e| e.event_type == FlowEventType::SessionStarted)
+        .filter(|e| e.event_type == FlowEventType::TurnStarted)
         .filter(|e| in_range(e.timestamp, start_ms, end_ms))
-        .count() as u64;
+        .filter_map(|e| e.session_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64;
 
     let agent_runtime_ms = completed.iter().map(|t| t.end - t.start).sum();
 
@@ -1185,6 +1187,29 @@ mod tests {
             None,
             json!({"bundle_id": bundle, "app_name": app}),
         )
+    }
+
+    fn session_started(id: &str, t: i64) -> FlowEvent {
+        FlowEvent::new(
+            t,
+            FlowSource::Cursor,
+            FlowEventType::SessionStarted,
+            Some(id.to_string()),
+            None,
+            json!({"project": "p", "title": "t"}),
+        )
+    }
+
+    #[test]
+    fn sessions_count_prompted_tabs_once() {
+        let events = vec![
+            session_started("s1", 0),
+            session_started("s2", 1_000),
+            turn_start("s1", "s1:1", 2_000),
+            turn_start("s1", "s1:2", 3_000),
+        ];
+        let summary = compute_summary(&events, 0, 10_000);
+        assert_eq!(summary.sessions, 1);
     }
 
     #[test]

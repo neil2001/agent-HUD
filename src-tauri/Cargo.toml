@@ -19,6 +19,7 @@ tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 notify = "8.0"
 dirs = "6.0"
@@ -27,6 +28,8 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 window-vibrancy = "0.6.0"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSView", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "objc2-core-foundation"] }
 
 [dev-dependencies]
 tempfile = "3.20"

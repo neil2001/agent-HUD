@@ -1,6 +1,6 @@
 export const METRIC_HELP = {
   turns: "Completed cycles: agent started working, then finished.",
-  sessions: "Cursor agent sessions first detected today.",
+  sessions: "Agent tabs you prompted today. Each tab counts once.",
   medianReturnLatency:
     "Typical time from when an agent finished until you focused Cursor again. Zero if you were already there.",
   p90ReturnLatency:
