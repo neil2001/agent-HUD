@@ -1,8 +1,8 @@
 # agent-HUD
 
-A minimal macOS HUD for active Cursor Desktop agent sessions.
+A minimal macOS HUD for active Cursor Desktop, cloud, and CLI (`agent` / `cursor-agent`) sessions.
 
-The HUD appears only while agents are running, lists one row per session, and focuses the matching Cursor window when clicked.
+The HUD appears only while agents are running, lists one row per session, and focuses that session when clicked.
 
 See [docs/ux-spec.md](docs/ux-spec.md) for the product specification.
 

@@ -56,28 +56,28 @@ pub fn run() {
         let builder = builder.plugin(tauri_nspanel::init());
         builder
     }
-        .manage(app_state)
-        .setup(|app| {
-            #[cfg(target_os = "macos")]
-            if let Err(err) = window::create_hud_window(app.handle()) {
-                eprintln!("failed to create HUD window: {err}");
-            }
+    .manage(app_state)
+    .setup(|app| {
+        #[cfg(target_os = "macos")]
+        if let Err(err) = window::create_hud_window(app.handle()) {
+            eprintln!("failed to create HUD window: {err}");
+        }
 
-            if let Err(err) = setup_tray(app) {
-                eprintln!("failed to create tray: {err}");
-            }
+        if let Err(err) = setup_tray(app) {
+            eprintln!("failed to create tray: {err}");
+        }
 
-            aggregator::start(
-                app.handle().clone(),
-                app.state::<Arc<AppState>>().inner().clone(),
-            );
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            get_sessions,
-            focus_session,
-            dismiss_session
-        ]);
+        aggregator::start(
+            app.handle().clone(),
+            app.state::<Arc<AppState>>().inner().clone(),
+        );
+        Ok(())
+    })
+    .invoke_handler(tauri::generate_handler![
+        get_sessions,
+        focus_session,
+        dismiss_session
+    ]);
 
     init_autostart(builder)
         .run(tauri::generate_context!())

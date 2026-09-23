@@ -58,10 +58,8 @@ pub fn normalize_tty(raw: &str) -> Option<String> {
     let short = raw.strip_prefix("/dev/").unwrap_or(raw);
     let digits = if let Some(rest) = short.strip_prefix("ttys") {
         rest
-    } else if let Some(rest) = short.strip_prefix("tty") {
-        rest
     } else {
-        return None;
+        short.strip_prefix("tty")?
     };
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return None;
