@@ -1,15 +1,15 @@
 mod daily;
-mod focus;
 pub mod flow;
+mod flow_window;
+mod focus;
 mod lifecycle;
 pub mod sessions;
 pub mod state;
-mod flow_window;
 mod window;
 
 use std::sync::Arc;
 
-use daily::{current_usage, start_pr_poller, DailyUsage, PrCache};
+use daily::{current_usage, start_pr_poller, DailyUsage, OpenPrList, PrCache};
 use flow::metrics::{compute_summary, compute_timeline, FlowSummary, FlowTimeline};
 use flow::{default_flow_db_path, FlowPipeline, FlowSettings, FlowStore};
 use flow_window::open_flow_window;
@@ -71,7 +71,9 @@ fn set_flow_settings(
     flow: tauri::State<Arc<FlowPipeline>>,
     settings: FlowSettings,
 ) -> Result<(), String> {
-    flow.store().set_settings(&settings).map_err(|e| e.to_string())
+    flow.store()
+        .set_settings(&settings)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -80,6 +82,11 @@ fn get_daily_usage(
     prs: tauri::State<Arc<PrCache>>,
 ) -> DailyUsage {
     current_usage(flow.store(), prs.inner())
+}
+
+#[tauri::command]
+fn list_open_prs(prs: tauri::State<Arc<PrCache>>, days: u32) -> Result<OpenPrList, String> {
+    daily::list_open_prs(prs.inner(), days)
 }
 
 #[tauri::command]
@@ -114,60 +121,61 @@ pub fn run() {
         let builder = builder.plugin(tauri_nspanel::init());
         builder
     }
-        .manage(app_state)
-        .setup(|app| {
-            let flow_store = match default_flow_db_path() {
-                Some(path) => {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    match FlowStore::open(&path) {
-                        Ok(store) => Arc::new(store),
-                        Err(err) => {
-                            eprintln!("flow: failed to open store at {path:?}: {err}");
-                            Arc::new(FlowStore::open_in_memory().expect("flow in-memory store"))
-                        }
+    .manage(app_state)
+    .setup(|app| {
+        let flow_store = match default_flow_db_path() {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match FlowStore::open(&path) {
+                    Ok(store) => Arc::new(store),
+                    Err(err) => {
+                        eprintln!("flow: failed to open store at {path:?}: {err}");
+                        Arc::new(FlowStore::open_in_memory().expect("flow in-memory store"))
                     }
                 }
-                None => Arc::new(FlowStore::open_in_memory().expect("flow in-memory store")),
-            };
-            let flow = Arc::new(FlowPipeline::new(flow_store));
-            let pr_cache = Arc::new(PrCache::new());
-            app.manage(flow.clone());
-            app.manage(pr_cache.clone());
-
-            #[cfg(target_os = "macos")]
-            if let Err(err) = window::create_hud_window(app.handle()) {
-                eprintln!("failed to create HUD window: {err}");
             }
+            None => Arc::new(FlowStore::open_in_memory().expect("flow in-memory store")),
+        };
+        let flow = Arc::new(FlowPipeline::new(flow_store));
+        let pr_cache = Arc::new(PrCache::new());
+        app.manage(flow.clone());
+        app.manage(pr_cache.clone());
 
-            if let Err(err) = setup_tray(app) {
-                eprintln!("failed to create tray: {err}");
-            }
+        #[cfg(target_os = "macos")]
+        if let Err(err) = window::create_hud_window(app.handle()) {
+            eprintln!("failed to create HUD window: {err}");
+        }
 
-            let flow_for_focus = flow.clone();
-            flow::focus_macos::start_focus_observer(flow_for_focus);
+        if let Err(err) = setup_tray(app) {
+            eprintln!("failed to create tray: {err}");
+        }
 
-            aggregator::start(
-                app.handle().clone(),
-                app.state::<Arc<AppState>>().inner().clone(),
-                flow.clone(),
-                pr_cache.clone(),
-            );
-            start_pr_poller(app.handle().clone(), flow, pr_cache);
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            get_sessions,
-            focus_session,
-            dismiss_session,
-            get_flow_summary,
-            get_flow_timeline,
-            get_flow_settings,
-            set_flow_settings,
-            get_daily_usage,
-            open_flow
-        ]);
+        let flow_for_focus = flow.clone();
+        flow::focus_macos::start_focus_observer(flow_for_focus);
+
+        aggregator::start(
+            app.handle().clone(),
+            app.state::<Arc<AppState>>().inner().clone(),
+            flow.clone(),
+            pr_cache.clone(),
+        );
+        start_pr_poller(app.handle().clone(), flow, pr_cache);
+        Ok(())
+    })
+    .invoke_handler(tauri::generate_handler![
+        get_sessions,
+        focus_session,
+        dismiss_session,
+        get_flow_summary,
+        get_flow_timeline,
+        get_flow_settings,
+        set_flow_settings,
+        get_daily_usage,
+        list_open_prs,
+        open_flow
+    ]);
 
     init_autostart(builder)
         .run(tauri::generate_context!())

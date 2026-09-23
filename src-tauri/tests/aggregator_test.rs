@@ -1,7 +1,7 @@
 use agent_hud_lib::sessions::cursor::{
     bubble_is_live_tool, classify, classify_cloud, composer_session_status,
-    discover_from_support_paths, is_agent_session, is_waiting_on_user, last_turn_kind, LastTurnKind,
-    UNFINISHED_PROMPT_RECENCY_MS,
+    discover_from_support_paths, is_agent_session, is_waiting_on_user, last_turn_kind,
+    LastTurnKind, UNFINISHED_PROMPT_RECENCY_MS,
 };
 use agent_hud_lib::sessions::{AgentKind, AgentSession, AgentStatus, ProjectInfo, SessionHost};
 use agent_hud_lib::state::{AppState, WORKING_HOLD_MS};

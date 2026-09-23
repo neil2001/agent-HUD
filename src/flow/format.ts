@@ -23,8 +23,38 @@ export function formatTime(ts: number): string {
   });
 }
 
+export function formatTurnsPerHour(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 10) return String(Math.round(value));
+  const rounded = Math.round(value * 10) / 10;
+  if (rounded === 0) return value > 0 ? "<0.1" : "0";
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+export function formatViewSpan(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (remainder === 0) return `${hours} hr`;
+  if (remainder === 30) return `${hours}.5 hr`;
+  return `${hours} hr ${remainder} min`;
+}
+
 export function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+export function formatRelative(ts: number, now = Date.now()): string {
+  const minutes = Math.floor(Math.max(0, now - ts) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
 }
 
 export function todayBoundsMs(): [number, number] {

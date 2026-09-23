@@ -30,11 +30,7 @@ impl FlowPipeline {
             return;
         }
 
-        let events = self
-            .differ
-            .lock()
-            .unwrap()
-            .diff(sessions, now_ms);
+        let events = self.differ.lock().unwrap().diff(sessions, now_ms);
 
         for event in events {
             if let Err(err) = self.store.append(&event) {

@@ -99,6 +99,16 @@ impl FlowStore {
         Ok(())
     }
 
+    pub fn update_payload(&self, id: &str, payload: &JsonValue) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "UPDATE events SET payload = ?1 WHERE id = ?2",
+            params![payload, id],
+        )?;
+        Ok(())
+    }
+
     pub fn append_many(&self, events: &[FlowEvent]) -> Result<(), rusqlite::Error> {
         for event in events {
             self.append(event)?;
@@ -133,13 +143,21 @@ impl FlowStore {
             "SELECT COUNT(DISTINCT session_id) FROM events
              WHERE type = ?1 AND timestamp >= ?2 AND timestamp < ?3
                AND session_id IS NOT NULL",
-            params![event_type_to_str(FlowEventType::TurnStarted), start_ms, end_ms],
+            params![
+                event_type_to_str(FlowEventType::TurnStarted),
+                start_ms,
+                end_ms
+            ],
             |row| row.get(0),
         )?;
         Ok(count.max(0) as u64)
     }
 
-    pub fn query_range(&self, start_ms: i64, end_ms: i64) -> Result<Vec<FlowEvent>, rusqlite::Error> {
+    pub fn query_range(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<FlowEvent>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, source, type, session_id, turn_id, payload
@@ -270,6 +288,7 @@ fn event_type_to_str(event_type: FlowEventType) -> &'static str {
         FlowEventType::TurnStarted => "turn_started",
         FlowEventType::TurnFinished => "turn_finished",
         FlowEventType::AppFocused => "app_focused",
+        FlowEventType::ChromePageFocused => "chrome_page_focused",
     }
 }
 
@@ -286,6 +305,7 @@ fn str_to_event_type(s: &str) -> FlowEventType {
         "turn_started" => FlowEventType::TurnStarted,
         "turn_finished" => FlowEventType::TurnFinished,
         "app_focused" => FlowEventType::AppFocused,
+        "chrome_page_focused" => FlowEventType::ChromePageFocused,
         _ => FlowEventType::SessionStarted,
     }
 }
@@ -457,11 +477,7 @@ mod tests {
     #[test]
     fn excluded_app_payload_redaction() {
         let excluded = default_excluded_bundle_ids();
-        let payload = redact_focus_payload(
-            "com.1password.1password",
-            "1Password",
-            &excluded,
-        );
+        let payload = redact_focus_payload("com.1password.1password", "1Password", &excluded);
         assert_eq!(payload["app_name"], "Hidden");
         assert_eq!(payload["excluded"], true);
 

@@ -241,17 +241,11 @@ mod tests {
         let mut differ = CursorDiffer::default();
         differ.diff(&[sample_session("s1", AgentStatus::Working)], 1000);
         let events = differ.diff(&[sample_session("s1", AgentStatus::NeedsAttention)], 2000);
-        assert!(
-            events
-                .iter()
-                .any(|e| e.event_type == FlowEventType::TurnFinished)
-        );
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == FlowEventType::TurnFinished));
         let events = differ.diff(&[sample_session("s1", AgentStatus::Working)], 3000);
-        assert!(
-            events
-                .iter()
-                .any(|e| e.turn_id.as_deref() == Some("s1:2"))
-        );
+        assert!(events.iter().any(|e| e.turn_id.as_deref() == Some("s1:2")));
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub enum FlowEventType {
     TurnStarted,
     TurnFinished,
     AppFocused,
+    ChromePageFocused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

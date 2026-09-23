@@ -18,7 +18,7 @@ mod macos {
     use super::*;
     use tauri::{WebviewUrl, WebviewWindow};
     use tauri_nspanel::{
-        CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt, tauri_panel,
+        tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
     };
 
     tauri_panel! {
@@ -31,19 +31,20 @@ mod macos {
     }
 
     pub fn create_hud_window(app: &AppHandle) -> Result<(), String> {
-        let window = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-            .title("agent-HUD")
-            .inner_size(HUD_WIDTH, height_for_session_count(0))
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .visible_on_all_workspaces(true)
-            .visible(false)
-            .focused(false)
-            .skip_taskbar(true)
-            .accept_first_mouse(true)
-            .build()
-            .map_err(|e| format!("window build failed: {e}"))?;
+        let window =
+            tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("agent-HUD")
+                .inner_size(HUD_WIDTH, height_for_session_count(0))
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .visible_on_all_workspaces(true)
+                .visible(false)
+                .focused(false)
+                .skip_taskbar(true)
+                .accept_first_mouse(true)
+                .build()
+                .map_err(|e| format!("window build failed: {e}"))?;
 
         if let Err(err) = apply_vibrancy(&window) {
             eprintln!("vibrancy failed: {err}");
@@ -57,12 +58,7 @@ mod macos {
                 panel.set_level(PanelLevel::Status.value());
                 // Borderless so AppKit does not paint a square HUD bezel
                 // around the rounded panel.
-                panel.set_style_mask(
-                    StyleMask::empty()
-                        .borderless()
-                        .nonactivating_panel()
-                        .into(),
-                );
+                panel.set_style_mask(StyleMask::empty().borderless().nonactivating_panel().into());
                 panel.set_collection_behavior(
                     CollectionBehavior::new()
                         .can_join_all_spaces()

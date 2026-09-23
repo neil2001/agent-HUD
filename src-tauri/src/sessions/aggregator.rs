@@ -13,12 +13,7 @@ use crate::window::sync_visibility;
 
 use super::cursor::{discover_active_sessions, watch_paths};
 
-pub fn start(
-    app: AppHandle,
-    state: Arc<AppState>,
-    flow: Arc<FlowPipeline>,
-    prs: Arc<PrCache>,
-) {
+pub fn start(app: AppHandle, state: Arc<AppState>, flow: Arc<FlowPipeline>, prs: Arc<PrCache>) {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(300));
         let (tx, rx) = mpsc::channel();

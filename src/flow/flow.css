@@ -22,15 +22,18 @@ html,
 body,
 #root {
   margin: 0;
-  min-height: 100%;
+  height: 100%;
+  overflow: hidden;
   background: var(--flow-bg);
   color: var(--flow-text);
 }
 
 .flow-app {
-  min-height: 100vh;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .flow-header {
@@ -75,6 +78,7 @@ body,
 
 .flow-main {
   flex: 1;
+  min-height: 0;
   padding: 24px 28px 40px;
   overflow: auto;
 }
@@ -221,6 +225,35 @@ body,
   border-radius: 6px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   pointer-events: none;
+  overflow-wrap: anywhere;
+}
+
+.flow-river-tip {
+  position: fixed;
+  z-index: 1000;
+  width: max-content;
+  max-width: min(220px, calc(100vw - 16px));
+  padding: 4px 6px;
+  font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(20, 20, 22, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+
+.flow-river-tip-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.flow-river-tip-meta,
+.flow-river-tip-detail {
+  color: rgba(255, 255, 255, 0.55);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -281,7 +314,17 @@ body,
 
 .flow-river-zoom {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-river-span {
+  min-width: 4.75rem;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--flow-text);
+  white-space: nowrap;
 }
 
 .flow-river-zoom button {
@@ -306,7 +349,7 @@ body,
   display: block;
   overflow: visible;
   cursor: grab;
-  touch-action: none;
+  touch-action: pan-y;
 }
 
 .flow-river-dragging {
@@ -336,6 +379,26 @@ body,
 
 .flow-river-segment-other {
   fill: rgba(255, 255, 255, 0.28);
+}
+
+.flow-river-segment-page {
+  fill: rgba(255, 255, 255, 0.4);
+}
+
+.flow-river-page-label,
+.flow-river-child-label {
+  font-size: 11px;
+  fill: rgba(255, 255, 255, 0.72);
+}
+
+.flow-river-section-label {
+  font-size: 10px;
+  fill: rgba(255, 255, 255, 0.34);
+}
+
+.flow-river-nest {
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 1;
 }
 
 .flow-river-piece {
@@ -482,4 +545,82 @@ body,
 .flow-error {
   color: #ff6b6b;
   margin-bottom: 16px;
+}
+
+.flow-pr-windows {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.flow-pr-windows button {
+  background: transparent;
+  border: none;
+  color: var(--flow-muted);
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.flow-pr-windows button[data-active="true"] {
+  background: var(--flow-surface);
+  color: var(--flow-text);
+}
+
+.flow-pr-count {
+  margin: 0 0 12px;
+  color: var(--flow-muted);
+  font-size: 12px;
+}
+
+.flow-pr-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flow-pr-row {
+  width: 100%;
+  text-align: left;
+  background: var(--flow-surface);
+  border: 1px solid var(--flow-border);
+  border-radius: 8px;
+  color: var(--flow-text);
+  padding: 12px 14px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.flow-pr-row:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.flow-pr-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.flow-pr-draft {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--flow-muted);
+  border: 1px solid var(--flow-border);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.flow-pr-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  color: var(--flow-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }

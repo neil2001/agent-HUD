@@ -1,10 +1,9 @@
 export const METRIC_HELP = {
-  turns: "Completed cycles: agent started working, then finished.",
-  sessions: "Agent tabs you prompted today. Each tab counts once.",
-  medianReturnLatency:
-    "Typical time from when an agent finished until you focused Cursor again. Zero if you were already there.",
-  p90ReturnLatency:
-    "Slow returns: 90% of measured returns were faster than this. Same definition as median return.",
+  turnsPerHour:
+    "Completed turns divided by the hours from your first turn today until now.",
+  meanTurnGap: "Average time from the start of one turn to the start of the next.",
+  returnLatency:
+    "How long after an agent finished until you focused Cursor again. Already being there counts as under a minute.",
   prematureChecks:
     "Times you focused Cursor while an agent was still working after being in another app.",
   notYetReturned:

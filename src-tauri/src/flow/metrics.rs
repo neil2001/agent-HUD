@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use super::event::{FlowEvent, FlowEventType};
-use super::focus_macos::is_agent_host_app;
+use super::focus_macos::{is_agent_host_app, CHROME_BUNDLE_ID};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowSummary {
@@ -16,6 +16,9 @@ pub struct FlowSummary {
     pub supervision_ms: i64,
     pub return_latency_median_ms: Option<i64>,
     pub return_latency_p90_ms: Option<i64>,
+    pub return_latency_buckets: ReturnLatencyBuckets,
+    pub turns_per_hour: Option<f64>,
+    pub mean_turn_gap_ms: Option<i64>,
     pub not_yet_returned: u64,
     pub median_turn_ms: Option<i64>,
     pub p90_turn_ms: Option<i64>,
@@ -30,6 +33,15 @@ pub struct ConcurrencyShare {
     pub two: f64,
     pub three: f64,
     pub four_plus: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnLatencyBuckets {
+    pub under_1m: u64,
+    pub m1_to_5m: u64,
+    pub m5_to_15m: u64,
+    pub m15_to_30m: u64,
+    pub over_30m: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +105,15 @@ pub struct RiverLane {
     pub app_name: String,
     pub is_cursor: bool,
     pub segments: Vec<RiverSegment>,
+    #[serde(default)]
+    pub pages: Vec<RiverPage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RiverPage {
+    pub label: String,
+    pub total_ms: i64,
+    pub segments: Vec<RiverSegment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,6 +157,8 @@ struct FocusPoint {
     timestamp: i64,
     bundle_id: String,
     app_name: String,
+    page_key: Option<String>,
+    page_title: Option<String>,
 }
 
 pub fn compute_summary(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> FlowSummary {
@@ -169,12 +192,13 @@ pub fn compute_summary(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flow
     let focus_points = focus_points(events);
     let premature = count_premature_checks(&focus_points, &wall_intervals);
     let supervision_ms = supervision_time(&focus_points, &wall_intervals);
-    let ctx_switches = context_switches_during_agent(&focus_points, &wall_intervals, start_ms, end_ms);
+    let ctx_switches =
+        context_switches_during_agent(&focus_points, &wall_intervals, start_ms, end_ms);
 
     let turn_durations: Vec<i64> = completed.iter().map(|t| t.end - t.start).collect();
 
-    let (return_median, return_p90, not_returned) =
-        return_latency_stats(events, &completed, end_ms);
+    let (return_latencies, not_returned) = return_latency_stats(events, &completed, end_ms);
+    let (turns_per_hour, mean_turn_gap_ms) = turn_cadence(&completed, start_ms, end_ms);
 
     let autonomous: Vec<i64> = completed
         .iter()
@@ -182,8 +206,7 @@ pub fn compute_summary(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flow
         .map(|t| t.end - t.start)
         .collect();
 
-    let focused_while_agents =
-        focused_time_while_agents(&focus_points, &wall_intervals, end_ms);
+    let focused_while_agents = focused_time_while_agents(&focus_points, &wall_intervals, end_ms);
 
     FlowSummary {
         prompts,
@@ -196,8 +219,11 @@ pub fn compute_summary(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flow
         context_switches_during_agent: ctx_switches,
         premature_checks: premature,
         supervision_ms,
-        return_latency_median_ms: return_median,
-        return_latency_p90_ms: return_p90,
+        return_latency_median_ms: percentile(&return_latencies, 50),
+        return_latency_p90_ms: percentile(&return_latencies, 90),
+        return_latency_buckets: bucket_return_latency(&return_latencies),
+        turns_per_hour,
+        mean_turn_gap_ms,
         not_yet_returned: not_returned,
         median_turn_ms: percentile(&turn_durations, 50),
         p90_turn_ms: percentile(&turn_durations, 90),
@@ -219,7 +245,11 @@ pub fn compute_timeline(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flo
         }
         match event.event_type {
             FlowEventType::TurnStarted => {
-                let title = event.payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let title = event
+                    .payload
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 entries.push(TimelineEntry {
                     timestamp: event.timestamp,
                     kind: "turn_started".to_string(),
@@ -237,6 +267,7 @@ pub fn compute_timeline(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> Flo
                     premature_check: false,
                 });
             }
+            FlowEventType::ChromePageFocused => {}
             FlowEventType::AppFocused => {
                 let app = event.payload["app_name"].as_str().unwrap_or("Unknown");
                 let bundle = event.payload["bundle_id"].as_str().unwrap_or("");
@@ -287,6 +318,7 @@ pub fn compute_river(events: &[FlowEvent], start_ms: i64, end_ms: i64) -> FlowRi
 
     let mut lanes = lanes_from_intervals(&intervals);
     collapse_lanes(&mut lanes);
+    attach_chrome_pages(&mut lanes, events, &focus, &intervals, start_ms, end_ms);
 
     let agent_bands = agent_bands_from_turns(&turns, &intervals, start_ms, end_ms);
     let mut markers = river_markers(events, &focus, &turns, &wall_intervals, start_ms, end_ms);
@@ -344,6 +376,8 @@ fn clean_focus_points(focus: &[FocusPoint]) -> Vec<FocusPoint> {
                 timestamp: point.timestamp,
                 bundle_id: clean_bundle_id(&point.bundle_id),
                 app_name,
+                page_key: point.page_key.clone(),
+                page_title: point.page_title.clone(),
             })
         })
         .collect()
@@ -386,6 +420,7 @@ fn lanes_from_intervals(intervals: &[FocusInterval]) -> Vec<RiverLane> {
                 app_name: interval.app_name.clone(),
                 is_cursor: false,
                 segments: Vec::new(),
+                pages: Vec::new(),
             });
         if interval_is_cursor(interval) {
             lane.is_cursor = true;
@@ -441,6 +476,7 @@ fn collapse_lanes(lanes: &mut Vec<RiverLane>) {
             app_name: "Other".to_string(),
             is_cursor: false,
             segments: other_segments,
+            pages: Vec::new(),
         });
     }
     *lanes = kept;
@@ -466,7 +502,15 @@ fn union_segments(mut segments: Vec<RiverSegment>) -> Vec<RiverSegment> {
 
 fn sort_lanes(lanes: &mut [RiverLane]) {
     lanes.sort_by(|a, b| {
-        let rank = |lane: &RiverLane| if lane.app_name == "Other" { 2 } else if lane.is_cursor { 0 } else { 1 };
+        let rank = |lane: &RiverLane| {
+            if lane.app_name == "Other" {
+                2
+            } else if lane.is_cursor {
+                0
+            } else {
+                1
+            }
+        };
         rank(a).cmp(&rank(b)).then_with(|| match rank(a) {
             0 => a.app_name.cmp(&b.app_name),
             1 => lane_duration(b)
@@ -475,6 +519,166 @@ fn sort_lanes(lanes: &mut [RiverLane]) {
             _ => std::cmp::Ordering::Equal,
         })
     });
+}
+
+const CHROME_PAGE_ROW_LIMIT: usize = 4;
+
+fn attach_chrome_pages(
+    lanes: &mut [RiverLane],
+    events: &[FlowEvent],
+    app_focus: &[FocusPoint],
+    intervals: &[FocusInterval],
+    start_ms: i64,
+    end_ms: i64,
+) {
+    let Some(chrome_name) = intervals
+        .iter()
+        .find(|interval| interval.bundle_id == CHROME_BUNDLE_ID)
+        .map(|interval| interval.app_name.clone())
+    else {
+        return;
+    };
+    let Some(lane) = lanes
+        .iter_mut()
+        .find(|lane| lane.app_name == chrome_name && lane.app_name != "Other")
+    else {
+        return;
+    };
+    lane.pages = chrome_page_rows(events, app_focus, intervals, start_ms, end_ms);
+}
+
+fn chrome_page_points(events: &[FlowEvent]) -> Vec<FocusPoint> {
+    events
+        .iter()
+        .filter(|event| event.event_type == FlowEventType::ChromePageFocused)
+        .filter_map(|event| {
+            let page_key = event
+                .payload
+                .get("page_key")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if page_key.is_empty() {
+                return None;
+            }
+            let page_title = event
+                .payload
+                .get("page_title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Some(FocusPoint {
+                timestamp: event.timestamp,
+                bundle_id: CHROME_BUNDLE_ID.to_string(),
+                app_name: String::new(),
+                page_key: Some(page_key),
+                page_title: Some(page_title),
+            })
+        })
+        .collect()
+}
+
+fn chrome_page_rows(
+    events: &[FlowEvent],
+    app_focus: &[FocusPoint],
+    intervals: &[FocusInterval],
+    start_ms: i64,
+    end_ms: i64,
+) -> Vec<RiverPage> {
+    let points = chrome_page_points(events);
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    struct Acc {
+        label: String,
+        latest: i64,
+        segments: Vec<RiverSegment>,
+    }
+
+    let mut grouped: std::collections::BTreeMap<String, Acc> = std::collections::BTreeMap::new();
+    for index in 0..points.len() {
+        let page_key = points[index].page_key.clone().unwrap_or_default();
+        let page_title = points[index].page_title.clone().unwrap_or_default();
+        let start = points[index].timestamp;
+        let mut end = end_ms;
+        if let Some(next) = points.get(index + 1) {
+            end = end.min(next.timestamp);
+        }
+        if let Some(leave) = app_focus
+            .iter()
+            .find(|point| point.timestamp > start && point.bundle_id != CHROME_BUNDLE_ID)
+            .map(|point| point.timestamp)
+        {
+            end = end.min(leave);
+        }
+        for interval in intervals {
+            if interval.bundle_id != CHROME_BUNDLE_ID {
+                continue;
+            }
+            let clipped_start = start.max(interval.start).max(start_ms);
+            let clipped_end = end.min(interval.end).min(end_ms);
+            if clipped_end <= clipped_start {
+                continue;
+            }
+            let entry = grouped.entry(page_key.clone()).or_insert(Acc {
+                label: String::new(),
+                latest: -1,
+                segments: Vec::new(),
+            });
+            if clipped_start >= entry.latest {
+                entry.latest = clipped_start;
+                entry.label = if page_title.is_empty() {
+                    page_key.clone()
+                } else {
+                    page_title.clone()
+                };
+            }
+            entry.segments.push(RiverSegment {
+                start_ms: clipped_start,
+                end_ms: clipped_end,
+            });
+        }
+    }
+
+    let mut rows: Vec<RiverPage> = grouped
+        .into_iter()
+        .map(|(_, acc)| RiverPage {
+            total_ms: acc
+                .segments
+                .iter()
+                .map(|segment| segment.end_ms - segment.start_ms)
+                .sum(),
+            label: acc.label,
+            segments: acc.segments,
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.total_ms
+            .cmp(&a.total_ms)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    if rows.len() <= CHROME_PAGE_ROW_LIMIT {
+        return rows;
+    }
+    let rest = rows.split_off(CHROME_PAGE_ROW_LIMIT);
+    let mut other_segments = Vec::new();
+    for row in rest {
+        other_segments.extend(row.segments);
+    }
+    other_segments.sort_by_key(|segment| segment.start_ms);
+    let other_total = other_segments
+        .iter()
+        .map(|segment| segment.end_ms - segment.start_ms)
+        .sum();
+    rows.push(RiverPage {
+        label: "Other tabs".to_string(),
+        total_ms: other_total,
+        segments: other_segments,
+    });
+    rows
 }
 
 fn band_label(project: &str, title: &str) -> String {
@@ -492,7 +696,14 @@ fn agent_bands_from_turns(
     start_ms: i64,
     end_ms: i64,
 ) -> Vec<RiverAgentBand> {
-    let mut bands = Vec::new();
+    struct Acc {
+        label: String,
+        latest_start: i64,
+        open: bool,
+        pieces: Vec<RiverPiece>,
+    }
+
+    let mut grouped: std::collections::BTreeMap<String, Acc> = std::collections::BTreeMap::new();
     for turn in turns {
         if turn.end <= start_ms || turn.start >= end_ms {
             continue;
@@ -502,45 +713,40 @@ fn agent_bands_from_turns(
         if end <= start {
             continue;
         }
-        bands.push(RiverAgentBand {
-            label: band_label(&turn.project, &turn.title),
-            open: !turn.closed,
-            pieces: pieces_for_span(start, end, intervals),
-        });
-    }
-    merge_same_label_bands(bands)
-}
-
-fn band_span(band: &RiverAgentBand) -> Option<(i64, i64)> {
-    let start = band.pieces.iter().map(|p| p.start_ms).min()?;
-    let end = band.pieces.iter().map(|p| p.end_ms).max()?;
-    Some((start, end))
-}
-
-fn merge_same_label_bands(mut bands: Vec<RiverAgentBand>) -> Vec<RiverAgentBand> {
-    bands.sort_by(|a, b| {
-        band_span(a)
-            .map(|s| s.0)
-            .cmp(&band_span(b).map(|s| s.0))
-            .then_with(|| a.label.cmp(&b.label))
-    });
-    let mut merged: Vec<RiverAgentBand> = Vec::new();
-    for band in bands {
-        let Some((start, _)) = band_span(&band) else {
-            continue;
-        };
-        if let Some(existing) = merged.iter_mut().find(|candidate| {
-            candidate.label == band.label
-                && band_span(candidate).is_some_and(|(_, end)| end <= start)
-        }) {
-            existing.pieces.extend(band.pieces);
-            existing.pieces.sort_by_key(|p| p.start_ms);
-            existing.open = existing.open || band.open;
+        let key = if turn.session_id.is_empty() {
+            format!("turn:{}", turn.turn_id)
         } else {
-            merged.push(band);
+            turn.session_id.clone()
+        };
+        let entry = grouped.entry(key).or_insert(Acc {
+            label: String::new(),
+            latest_start: -1,
+            open: false,
+            pieces: Vec::new(),
+        });
+        if turn.start >= entry.latest_start {
+            entry.latest_start = turn.start;
+            if !turn.title.is_empty() || entry.label.is_empty() {
+                entry.label = band_label(&turn.project, &turn.title);
+            }
         }
+        entry.open |= !turn.closed;
+        entry.pieces.extend(pieces_for_span(start, end, intervals));
     }
-    merged
+
+    let mut bands: Vec<RiverAgentBand> = grouped
+        .into_values()
+        .map(|mut acc| {
+            acc.pieces.sort_by_key(|piece| (piece.start_ms, piece.end_ms));
+            RiverAgentBand {
+                label: acc.label,
+                open: acc.open,
+                pieces: merge_pieces(acc.pieces),
+            }
+        })
+        .collect();
+    bands.sort_by_key(|band| band.pieces.iter().map(|piece| piece.start_ms).min().unwrap_or(0));
+    bands
 }
 
 fn pieces_for_span(start: i64, end: i64, intervals: &[FocusInterval]) -> Vec<RiverPiece> {
@@ -610,8 +816,13 @@ fn river_markers(
         if !in_range(point.timestamp, start_ms, end_ms) {
             continue;
         }
-        if is_premature_focus_at(point.timestamp, &point.bundle_id, &point.app_name, focus, wall)
-        {
+        if is_premature_focus_at(
+            point.timestamp,
+            &point.bundle_id,
+            &point.app_name,
+            focus,
+            wall,
+        ) {
             markers.push(RiverMarker {
                 timestamp: point.timestamp,
                 kind: "premature_check".to_string(),
@@ -851,6 +1062,8 @@ fn focus_points(events: &[FlowEvent]) -> Vec<FocusPoint> {
             timestamp: e.timestamp,
             bundle_id: e.payload["bundle_id"].as_str().unwrap_or("").to_string(),
             app_name: e.payload["app_name"].as_str().unwrap_or("").to_string(),
+            page_key: None,
+            page_title: None,
         })
         .collect()
 }
@@ -951,7 +1164,7 @@ fn return_latency_stats(
     events: &[FlowEvent],
     completed: &[&TurnInterval],
     end_ms: i64,
-) -> (Option<i64>, Option<i64>, u64) {
+) -> (Vec<i64>, u64) {
     let mut latencies = Vec::new();
     let mut not_returned = 0u64;
 
@@ -980,9 +1193,11 @@ fn return_latency_stats(
 
         let deadline = next_turn_start.unwrap_or(end_ms);
 
-        let next_agent_focus = all_focus
-            .iter()
-            .find(|p| p.timestamp > finish && p.timestamp < deadline && is_agent_host(&p.bundle_id, &p.app_name));
+        let next_agent_focus = all_focus.iter().find(|p| {
+            p.timestamp > finish
+                && p.timestamp < deadline
+                && is_agent_host(&p.bundle_id, &p.app_name)
+        });
 
         if let Some(p) = next_agent_focus {
             latencies.push(p.timestamp - finish);
@@ -993,18 +1208,40 @@ fn return_latency_stats(
         }
     }
 
-    (
-        percentile(&latencies, 50),
-        percentile(&latencies, 90),
-        not_returned,
-    )
+    (latencies, not_returned)
 }
 
-fn focused_time_while_agents(
-    focus: &[FocusPoint],
-    wall: &[(i64, i64)],
+/// Pace since the first completed turn, and the average start-to-start gap.
+fn turn_cadence(
+    completed: &[&TurnInterval],
+    start_ms: i64,
     end_ms: i64,
-) -> i64 {
+) -> (Option<f64>, Option<i64>) {
+    let mut starts: Vec<i64> = completed
+        .iter()
+        .filter(|turn| in_range(turn.end, start_ms, end_ms))
+        .map(|turn| turn.start)
+        .collect();
+    if starts.is_empty() {
+        return (None, None);
+    }
+    starts.sort_unstable();
+    let origin = starts[0].max(start_ms);
+    let elapsed = end_ms - origin;
+    let turns_per_hour = if elapsed > 0 {
+        Some(starts.len() as f64 * 3_600_000.0 / elapsed as f64)
+    } else {
+        None
+    };
+    if starts.len() < 2 {
+        return (turns_per_hour, None);
+    }
+    let gaps: i64 = starts.windows(2).map(|pair| pair[1] - pair[0]).sum();
+    let mean_gap = gaps / (starts.len() as i64 - 1);
+    (turns_per_hour, Some(mean_gap))
+}
+
+fn focused_time_while_agents(focus: &[FocusPoint], wall: &[(i64, i64)], end_ms: i64) -> i64 {
     let periods = focus_periods_raw(focus, end_ms);
     let mut total = 0i64;
     for (start, end, _) in periods {
@@ -1091,15 +1328,17 @@ fn project_rollups(
         if !turn.closed || turn.start >= end_ms || turn.end <= start_ms {
             continue;
         }
-        let entry = map.entry(turn.project.clone()).or_insert(AgentProjectRollup {
-            project: turn.project.clone(),
-            sessions: 0,
-            turns: 0,
-            runtime_ms: 0,
-            median_turn_ms: None,
-            p90_turn_ms: None,
-            premature_checks: 0,
-        });
+        let entry = map
+            .entry(turn.project.clone())
+            .or_insert(AgentProjectRollup {
+                project: turn.project.clone(),
+                sessions: 0,
+                turns: 0,
+                runtime_ms: 0,
+                median_turn_ms: None,
+                p90_turn_ms: None,
+                premature_checks: 0,
+            });
         entry.turns += 1;
         entry.runtime_ms += turn.end - turn.start;
         entry.premature_checks += premature_for_turn(turn, focus);
@@ -1117,6 +1356,26 @@ fn project_rollups(
     }
     result.sort_by(|a, b| a.project.cmp(&b.project));
     result
+}
+
+fn bucket_return_latency(latencies: &[i64]) -> ReturnLatencyBuckets {
+    let mut buckets = ReturnLatencyBuckets {
+        under_1m: 0,
+        m1_to_5m: 0,
+        m5_to_15m: 0,
+        m15_to_30m: 0,
+        over_30m: 0,
+    };
+    for latency in latencies {
+        match *latency {
+            value if value < 60_000 => buckets.under_1m += 1,
+            value if value < 5 * 60_000 => buckets.m1_to_5m += 1,
+            value if value < 15 * 60_000 => buckets.m5_to_15m += 1,
+            value if value < 30 * 60_000 => buckets.m15_to_30m += 1,
+            _ => buckets.over_30m += 1,
+        }
+    }
+    buckets
 }
 
 fn bucket_turns(durations: &[i64]) -> TurnDurationBuckets {
@@ -1153,7 +1412,7 @@ fn percentile(values: &[i64], pct: u8) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::flow::event::{FlowEvent, FlowEventType, FlowSource};
-    use crate::flow::focus_macos::CURSOR_BUNDLE_ID;
+    use crate::flow::focus_macos::{CHROME_BUNDLE_ID, CURSOR_BUNDLE_ID};
     use serde_json::json;
 
     fn turn_start(id: &str, turn: &str, t: i64) -> FlowEvent {
@@ -1186,6 +1445,17 @@ mod tests {
             None,
             None,
             json!({"bundle_id": bundle, "app_name": app}),
+        )
+    }
+
+    fn page(key: &str, title: &str, t: i64) -> FlowEvent {
+        FlowEvent::new(
+            t,
+            FlowSource::Macos,
+            FlowEventType::ChromePageFocused,
+            None,
+            None,
+            json!({"page_key": key, "page_title": title}),
         )
     }
 
@@ -1260,6 +1530,47 @@ mod tests {
         ];
         let summary = compute_summary(&events, 0, 10_000);
         assert_eq!(summary.return_latency_median_ms, Some(0));
+        assert_eq!(summary.return_latency_buckets.under_1m, 1);
+    }
+
+    #[test]
+    fn return_latency_histogram_counts_the_wait() {
+        let events = vec![
+            focus("com.google.Chrome", "Chrome", 0),
+            turn_start("s1", "s1:1", 1_000),
+            turn_end("s1", "s1:1", 2_000),
+            focus(CURSOR_BUNDLE_ID, "Cursor", 2_000 + 10 * 60_000),
+        ];
+        let summary = compute_summary(&events, 0, 20 * 60_000);
+        assert_eq!(summary.return_latency_buckets.m5_to_15m, 1);
+        assert_eq!(summary.return_latency_buckets.under_1m, 0);
+        assert_eq!(summary.not_yet_returned, 0);
+    }
+
+    #[test]
+    fn turn_cadence_is_rate_since_first_turn_and_mean_start_gap() {
+        let hour = 3_600_000;
+        let events = vec![
+            turn_start("s1", "s1:1", 0),
+            turn_end("s1", "s1:1", 60_000),
+            turn_start("s1", "s1:2", hour),
+            turn_end("s1", "s1:2", hour + 60_000),
+            turn_start("s1", "s1:3", 2 * hour),
+            turn_end("s1", "s1:3", 2 * hour + 60_000),
+        ];
+        let summary = compute_summary(&events, 0, 3 * hour);
+        let rate = summary.turns_per_hour.expect("rate");
+        assert!((rate - 1.0).abs() < 0.001);
+        assert_eq!(summary.mean_turn_gap_ms, Some(hour));
+    }
+
+    #[test]
+    fn single_turn_has_no_gap() {
+        let events = vec![turn_start("s1", "s1:1", 0), turn_end("s1", "s1:1", 60_000)];
+        let summary = compute_summary(&events, 0, 3_600_000);
+        let rate = summary.turns_per_hour.expect("rate");
+        assert!((rate - 1.0).abs() < 0.001);
+        assert_eq!(summary.mean_turn_gap_ms, None);
     }
 
     #[test]
@@ -1330,7 +1641,10 @@ mod tests {
         let river = compute_river(&events, 0, 60_000);
         let band = &river.agent_bands[0];
         assert!(band.open);
-        assert!(band.pieces.iter().any(|p| p.autonomous && p.start_ms == 10_000));
+        assert!(band
+            .pieces
+            .iter()
+            .any(|p| p.autonomous && p.start_ms == 10_000));
         assert!(band
             .pieces
             .iter()
@@ -1398,7 +1712,10 @@ mod tests {
         let other = river.lanes.iter().find(|l| l.app_name == "Other").unwrap();
         let other_ms: i64 = other.segments.iter().map(|s| s.end_ms - s.start_ms).sum();
         assert_eq!(other_ms, 10_000 + 20_000);
-        assert!(river.lanes.iter().all(|l| l.app_name != "App1" && l.app_name != "App2"));
+        assert!(river
+            .lanes
+            .iter()
+            .all(|l| l.app_name != "App1" && l.app_name != "App2"));
         assert_eq!(river.lanes.last().unwrap().app_name, "Other");
     }
 
@@ -1413,6 +1730,32 @@ mod tests {
         assert_eq!(river.lanes[0].app_name, "Cursor");
         assert!(river.lanes[0].is_cursor);
         assert_eq!(river.lanes[0].segments.len(), 2);
+    }
+
+    fn turn_start_named(id: &str, turn: &str, title: &str, t: i64) -> FlowEvent {
+        FlowEvent::new(
+            t,
+            FlowSource::Cursor,
+            FlowEventType::TurnStarted,
+            Some(id.to_string()),
+            Some(turn.to_string()),
+            json!({"project": "agent-HUD", "title": title}),
+        )
+    }
+
+    #[test]
+    fn river_retitled_session_stays_one_band() {
+        let events = vec![
+            turn_start_named("s1", "s1:1", "Agent Flow", 0),
+            turn_end("s1", "s1:1", 10_000),
+            turn_start_named("s1", "s1:2", "Tokens", 20_000),
+            turn_end("s1", "s1:2", 30_000),
+        ];
+        let river = compute_river(&events, 0, 40_000);
+        assert_eq!(river.agent_bands.len(), 1);
+        assert_eq!(river.agent_bands[0].label, "agent-HUD · Tokens");
+        assert_eq!(river.agent_bands[0].pieces.len(), 2);
+        assert!(!river.agent_bands[0].open);
     }
 
     #[test]
@@ -1466,5 +1809,96 @@ mod tests {
         ];
         let summary = compute_summary(&events, 0, 20_000);
         assert!(summary.context_switches_during_agent >= 1);
+    }
+
+    #[test]
+    fn river_chrome_pages_sum_to_the_chrome_visit() {
+        let events = vec![
+            focus(CHROME_BUNDLE_ID, "Chrome", 0),
+            page("a.example/one", "Alpha", 0),
+            page("b.example/two", "Beta", 30_000),
+        ];
+        let river = compute_river(&events, 0, 60_000);
+        assert_eq!(river.lanes.len(), 1);
+        assert_eq!(
+            river.lanes[0].segments[0].end_ms - river.lanes[0].segments[0].start_ms,
+            60_000
+        );
+        assert_eq!(river.lanes[0].pages.len(), 2);
+        let total: i64 = river.lanes[0].pages.iter().map(|row| row.total_ms).sum();
+        assert_eq!(total, 60_000);
+    }
+
+    #[test]
+    fn river_repeat_page_keeps_two_segments() {
+        let events = vec![
+            focus(CHROME_BUNDLE_ID, "Chrome", 0),
+            page("a.example/one", "Alpha", 0),
+            page("b.example/two", "Beta", 10_000),
+            page("a.example/one", "Alpha 2", 20_000),
+        ];
+        let river = compute_river(&events, 0, 30_000);
+        let alpha = river.lanes[0]
+            .pages
+            .iter()
+            .find(|row| row.label == "Alpha 2")
+            .unwrap();
+        assert_eq!(alpha.segments.len(), 2);
+        assert_eq!(alpha.total_ms, 20_000);
+        assert_eq!(alpha.segments[0].end_ms, 10_000);
+        assert_eq!(alpha.segments[1].start_ms, 20_000);
+    }
+
+    #[test]
+    fn river_retitled_page_is_one_segment() {
+        let events = vec![
+            focus(CHROME_BUNDLE_ID, "Chrome", 0),
+            page("github.com/foo", "GitHub - PR #123", 0),
+        ];
+        let river = compute_river(&events, 0, 60_000);
+        assert_eq!(river.lanes[0].pages.len(), 1);
+        assert_eq!(river.lanes[0].pages[0].label, "GitHub - PR #123");
+        assert_eq!(river.lanes[0].pages[0].segments.len(), 1);
+        assert_eq!(river.lanes[0].pages[0].total_ms, 60_000);
+    }
+
+    #[test]
+    fn page_change_does_not_count_as_context_switch() {
+        let events = vec![
+            focus(CURSOR_BUNDLE_ID, "Cursor", 0),
+            turn_start("s1", "s1:1", 1_000),
+            focus(CHROME_BUNDLE_ID, "Chrome", 2_000),
+            page("a.example/one", "Alpha", 2_000),
+            page("b.example/two", "Beta", 3_000),
+            turn_end("s1", "s1:1", 10_000),
+        ];
+        let summary = compute_summary(&events, 0, 20_000);
+        assert_eq!(summary.context_switches_during_agent, 1);
+    }
+
+    #[test]
+    fn chrome_page_change_does_not_split_focus_period() {
+        let end = 15 * 60 * 1000;
+        let events = vec![
+            focus(CHROME_BUNDLE_ID, "Chrome", 0),
+            page("a.example/one", "Alpha", 0),
+            page("b.example/two", "Beta", 6 * 60 * 1000),
+        ];
+        let timeline = compute_timeline(&events, 0, end);
+        assert_eq!(timeline.focus_periods.len(), 1);
+        assert_eq!(timeline.focus_periods[0].app_name, "Chrome");
+        assert!(timeline
+            .entries
+            .iter()
+            .all(|entry| entry.kind != "chrome_page_focused"));
+    }
+
+    #[test]
+    fn chrome_without_page_metadata_stays_one_lane() {
+        let events = vec![focus(CHROME_BUNDLE_ID, "Chrome", 0)];
+        let river = compute_river(&events, 0, 60_000);
+        assert_eq!(river.lanes.len(), 1);
+        assert_eq!(river.lanes[0].app_name, "Chrome");
+        assert!(river.lanes[0].pages.is_empty());
     }
 }

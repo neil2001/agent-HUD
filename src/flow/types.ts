@@ -5,6 +5,14 @@ export type ConcurrencyShare = {
   four_plus: number;
 };
 
+export type ReturnLatencyBuckets = {
+  under_1m: number;
+  m1_to_5m: number;
+  m5_to_15m: number;
+  m15_to_30m: number;
+  over_30m: number;
+};
+
 export type TurnDurationBuckets = {
   under_30s: number;
   s30_to_2m: number;
@@ -26,6 +34,9 @@ export type FlowSummary = {
   supervision_ms: number;
   return_latency_median_ms: number | null;
   return_latency_p90_ms: number | null;
+  return_latency_buckets: ReturnLatencyBuckets;
+  turns_per_hour: number | null;
+  mean_turn_gap_ms: number | null;
   not_yet_returned: number;
   median_turn_ms: number | null;
   p90_turn_ms: number | null;
@@ -66,10 +77,17 @@ export type RiverSegment = {
   end_ms: number;
 };
 
+export type RiverPage = {
+  label: string;
+  total_ms: number;
+  segments: RiverSegment[];
+};
+
 export type RiverLane = {
   app_name: string;
   is_cursor: boolean;
   segments: RiverSegment[];
+  pages: RiverPage[];
 };
 
 export type RiverPiece = {
@@ -108,4 +126,18 @@ export type FlowSettings = {
   recording_enabled: boolean;
   retention_days: number;
   excluded_bundle_ids: string[];
+};
+
+export type OpenPr = {
+  number: number;
+  title: string;
+  url: string;
+  repo: string;
+  updated_at_ms: number;
+  is_draft: boolean;
+};
+
+export type OpenPrList = {
+  total: number;
+  prs: OpenPr[];
 };

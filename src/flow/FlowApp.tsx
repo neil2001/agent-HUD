@@ -1,13 +1,14 @@
 import { type ReactNode, useMemo, useState } from "react";
 import "./flow.css";
-import { formatDuration, formatPercent, formatTime } from "./format";
+import { formatDuration, formatPercent, formatTime, formatTurnsPerHour } from "./format";
 import { ContextRiver } from "./ContextRiver";
 import { METRIC_HELP } from "./metricHelp";
 import { MetricTooltip } from "./MetricTooltip";
+import { PrsView } from "./PrsView";
 import { useFlowData } from "./useFlowData";
-import type { FlowSettings, FlowSummary, FlowTimeline, TurnDurationBuckets } from "./types";
+import type { FlowSettings, FlowSummary, FlowTimeline } from "./types";
 
-type Tab = "overview" | "timeline" | "focus" | "agents" | "privacy";
+type Tab = "overview" | "timeline" | "focus" | "agents" | "prs" | "privacy";
 
 export function FlowApp() {
   const { summary, timeline, settings, loading, error, refresh, saveSettings } =
@@ -34,6 +35,7 @@ export function FlowApp() {
             ["timeline", "Timeline"],
             ["focus", "Focus"],
             ["agents", "Agents"],
+            ["prs", "PRs"],
             ["privacy", "Privacy"],
           ] as const
         ).map(([id, label]) => (
@@ -48,9 +50,9 @@ export function FlowApp() {
         ))}
       </nav>
       <main className="flow-main">
-        {error && <p className="flow-error">{error}</p>}
-        {loading && <p className="flow-empty">Loading…</p>}
-        {empty && tab !== "privacy" && (
+        {error && tab !== "prs" && <p className="flow-error">{error}</p>}
+        {loading && tab !== "prs" && <p className="flow-empty">Loading…</p>}
+        {empty && tab !== "privacy" && tab !== "prs" && (
           <p className="flow-empty">No agent activity recorded today.</p>
         )}
         {!loading && summary && timeline && tab === "overview" && !empty && (
@@ -65,6 +67,7 @@ export function FlowApp() {
         {!loading && timeline && tab === "agents" && !empty && (
           <AgentsView agents={timeline.agents} />
         )}
+        {tab === "prs" && <PrsView />}
         {tab === "privacy" && settings && (
           <PrivacyView settings={settings} onSave={saveSettings} onRefresh={refresh} />
         )}
@@ -80,56 +83,41 @@ function Overview({
   summary: FlowSummary;
   timeline: FlowTimeline;
 }) {
-  const buckets = summary.turn_duration_buckets;
-  const maxBucket = Math.max(
-    buckets.under_30s,
-    buckets.s30_to_2m,
-    buckets.m2_to_5m,
-    buckets.m5_to_15m,
-    buckets.over_15m,
-    1,
-  );
-
   return (
     <div className="flow-overview">
       <ContextRiver river={timeline.river} />
       <div className="flow-activity-row">
         <ActivityFigure
-          label="Sessions"
-          value={String(summary.sessions)}
-          help={METRIC_HELP.sessions}
+          label="Turns/hr"
+          value={formatTurnsPerHour(summary.turns_per_hour)}
+          help={METRIC_HELP.turnsPerHour}
         />
         <ActivityFigure
-          label="Turns"
-          value={String(summary.turns)}
-          help={METRIC_HELP.turns}
+          label="Between turns"
+          value={
+            summary.mean_turn_gap_ms != null
+              ? formatDuration(summary.mean_turn_gap_ms)
+              : "—"
+          }
+          help={METRIC_HELP.meanTurnGap}
         />
       </div>
 
       <section className="flow-overview-section">
-        <h2 className="flow-section-heading">The loop</h2>
+        <SectionTitle help={METRIC_HELP.returnLatency}>The loop</SectionTitle>
         <p className="flow-loop-caption">
-          Prompt → other work → return after the agent finishes
+          How long until you get back after the agent finishes
         </p>
+        <CountHistogram
+          rows={[
+            ["<1m", summary.return_latency_buckets.under_1m],
+            ["1–5m", summary.return_latency_buckets.m1_to_5m],
+            ["5–15m", summary.return_latency_buckets.m5_to_15m],
+            ["15–30m", summary.return_latency_buckets.m15_to_30m],
+            ["30m+", summary.return_latency_buckets.over_30m],
+          ]}
+        />
         <div className="flow-loop-grid">
-          <Stat
-            label="Median return"
-            value={
-              summary.return_latency_median_ms != null
-                ? formatDuration(summary.return_latency_median_ms)
-                : "—"
-            }
-            help={METRIC_HELP.medianReturnLatency}
-          />
-          <Stat
-            label="P90 return"
-            value={
-              summary.return_latency_p90_ms != null
-                ? formatDuration(summary.return_latency_p90_ms)
-                : "—"
-            }
-            help={METRIC_HELP.p90ReturnLatency}
-          />
           <Stat
             label="Premature checks"
             value={String(summary.premature_checks)}
@@ -162,7 +150,15 @@ function Overview({
         <SectionTitle help={METRIC_HELP.turnDurationSection}>
           Turn duration
         </SectionTitle>
-        <DurationHistogram buckets={buckets} max={maxBucket} />
+        <CountHistogram
+          rows={[
+            ["<30s", summary.turn_duration_buckets.under_30s],
+            ["30s–2m", summary.turn_duration_buckets.s30_to_2m],
+            ["2–5m", summary.turn_duration_buckets.m2_to_5m],
+            ["5–15m", summary.turn_duration_buckets.m5_to_15m],
+            ["15m+", summary.turn_duration_buckets.over_15m],
+          ]}
+        />
       </section>
     </div>
   );
@@ -260,24 +256,12 @@ function ShareHistogram({
   );
 }
 
-function DurationHistogram({
-  buckets,
-  max,
+function CountHistogram({
+  rows,
 }: {
-  buckets: TurnDurationBuckets;
-  max: number;
+  rows: ReadonlyArray<readonly [string, number]>;
 }) {
-  const rows = useMemo(
-    () =>
-      [
-        ["<30s", buckets.under_30s],
-        ["30s–2m", buckets.s30_to_2m],
-        ["2–5m", buckets.m2_to_5m],
-        ["5–15m", buckets.m5_to_15m],
-        ["15m+", buckets.over_15m],
-      ] as const,
-    [buckets],
-  );
+  const max = Math.max(1, ...rows.map(([, count]) => count));
 
   return (
     <div>

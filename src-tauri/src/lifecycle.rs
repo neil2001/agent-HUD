@@ -24,12 +24,14 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         "Enable Open at Login"
     };
 
-    let open_flow =
-        MenuItem::with_id(app, "open-flow", "Open Agent Flow", true, None::<&str>)?;
+    let open_flow = MenuItem::with_id(app, "open-flow", "Open Agent Flow", true, None::<&str>)?;
     let autostart = MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit agent-HUD", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open_flow, &separator, &autostart, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&open_flow, &separator, &autostart, &separator, &quit],
+    )?;
 
     let mut tray = TrayIconBuilder::with_id("main")
         .menu(&menu)
