@@ -63,10 +63,6 @@ body {
   padding: 0 2px 0 0;
 }
 
-.daily-strip-divided {
-  border-bottom: 1px solid var(--hud-border);
-}
-
 .daily-metric {
   flex: 1;
   min-width: 0;

@@ -11,7 +11,7 @@ function App() {
   return (
     <div className="hud-root">
       <div className="hud-drag-handle" data-tauri-drag-region />
-      <DailyStrip usage={usage} divided={sessions.length > 0} />
+      <DailyStrip usage={usage} />
       {sessions.length > 0 ? <AgentList sessions={sessions} /> : null}
     </div>
   );

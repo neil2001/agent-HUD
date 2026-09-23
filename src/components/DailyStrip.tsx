@@ -3,16 +3,15 @@ import type { DailyUsage } from "../types";
 
 type DailyStripProps = {
   usage: DailyUsage;
-  divided: boolean;
 };
 
 function formatCount(value: number | null): string {
   return value == null ? "—" : String(value);
 }
 
-export function DailyStrip({ usage, divided }: DailyStripProps) {
+export function DailyStrip({ usage }: DailyStripProps) {
   return (
-    <div className={divided ? "daily-strip daily-strip-divided" : "daily-strip"}>
+    <div className="daily-strip">
       <Metric label="sessions" value={String(usage.sessions)} />
       <Metric label="turns" value={String(usage.turns)} />
       <Metric label="opened" value={formatCount(usage.prs_opened)} />
@@ -25,20 +24,10 @@ export function DailyStrip({ usage, divided }: DailyStripProps) {
           invoke("open_flow").catch(() => undefined);
         }}
       >
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path
-            d="M4.25 11.75 11.75 4.25"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinecap="round"
-          />
-          <path
-            d="M6.25 4.25h5.5v5.5"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+        <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="8" cy="3.25" r="1.15" fill="currentColor" />
+          <circle cx="8" cy="8" r="1.15" fill="currentColor" />
+          <circle cx="8" cy="12.75" r="1.15" fill="currentColor" />
         </svg>
       </button>
     </div>
