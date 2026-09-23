@@ -291,6 +291,8 @@ There is exactly one primary interaction:
 
 > Click an agent → focus that agent.
 
+Cursor CLI sessions (`agent` / `cursor-agent`) are listed with Desktop and cloud sessions. A CLI click focuses the terminal running that session. A Desktop or cloud click opens that session in Cursor.
+
 Example:
 
 ```text

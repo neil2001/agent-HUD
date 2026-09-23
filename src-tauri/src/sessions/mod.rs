@@ -1,4 +1,5 @@
 pub mod aggregator;
+pub mod cli;
 pub mod cursor;
 pub mod sqlite;
 
@@ -40,8 +41,16 @@ pub enum AgentKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionHost {
-    CursorDesktop { workspace_path: String },
-    CursorCloud { workspace_path: Option<String> },
+    CursorDesktop {
+        workspace_path: String,
+    },
+    CursorCloud {
+        workspace_path: Option<String>,
+    },
+    CursorCli {
+        workspace_path: String,
+        tty: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
