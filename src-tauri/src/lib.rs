@@ -1,5 +1,6 @@
-mod focus;
+pub mod focus;
 mod lifecycle;
+mod process_cmd;
 pub mod sessions;
 pub mod state;
 mod window;

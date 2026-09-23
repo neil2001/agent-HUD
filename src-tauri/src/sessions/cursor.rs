@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use serde_json::Value;
 
+use super::cli::{self, AgentProcess, CliRoots};
 use super::sqlite::{
     json_from_row, open_readonly, read_disk_kv_json, read_item_json, row_bool, row_opt_i64,
 };
@@ -65,10 +66,44 @@ fn pgrep_cursor() -> bool {
 }
 
 pub fn discover_active_sessions() -> Vec<AgentSession> {
-    let Some((global_db, workspace_root, transcripts_root)) = cursor_support_paths() else {
+    let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    discover_from_support_paths(&global_db, &workspace_root, &transcripts_root)
+    let global_db = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    let workspace_root = home.join("Library/Application Support/Cursor/User/workspaceStorage");
+    let transcripts_root = home.join(".cursor/projects");
+    let cli_roots = CliRoots {
+        chats_dir: home.join(".cursor/chats"),
+        projects_dir: transcripts_root.clone(),
+    };
+    discover_all(
+        &global_db,
+        &workspace_root,
+        &transcripts_root,
+        &cli_roots,
+        &cli::list_agent_processes(),
+    )
+}
+
+pub fn discover_all(
+    global_db: &Path,
+    workspace_root: &Path,
+    transcripts_root: &Path,
+    cli_roots: &CliRoots,
+    processes: &[AgentProcess],
+) -> Vec<AgentSession> {
+    let mut sessions = discover_from_support_paths(global_db, workspace_root, transcripts_root);
+    let mut ids: HashSet<String> = sessions.iter().map(|session| session.id.clone()).collect();
+    for mut session in cli::discover_cli_sessions(cli_roots, processes) {
+        if ids.contains(&session.id) {
+            session.id = format!("cli:{}", session.id);
+        }
+        if ids.insert(session.id.clone()) {
+            sessions.push(session);
+        }
+    }
+    sort_agent_sessions(&mut sessions);
+    sessions
 }
 
 pub fn discover_from_support_paths(
@@ -928,6 +963,9 @@ pub fn watch_paths() -> Vec<PathBuf> {
         paths.push(global_db.with_extension("vscdb-wal"));
         paths.push(workspace_root);
         paths.push(transcripts_root);
+    }
+    if let Some(chats) = cli::chats_dir() {
+        paths.push(chats);
     }
     paths
 }

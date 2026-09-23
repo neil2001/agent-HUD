@@ -8,7 +8,8 @@ export type AgentKind = "cursor";
 
 export type SessionHost =
   | { type: "cursor_desktop"; workspace_path: string }
-  | { type: "cursor_cloud"; workspace_path?: string };
+  | { type: "cursor_cloud"; workspace_path?: string }
+  | { type: "cursor_cli"; workspace_path: string; tty: string | null };
 
 export type AgentSession = {
   id: string;
