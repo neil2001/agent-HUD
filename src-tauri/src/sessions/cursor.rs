@@ -126,21 +126,7 @@ fn collect_from_composer_headers(
             continue;
         }
 
-        let data_updated = composer_data.and_then(|data| {
-            data.get("lastUpdatedAt")
-                .or_else(|| data.get("updatedAt"))
-                .and_then(|v| v.as_i64())
-        });
-        let updated_at = [
-            header.last_updated_at,
-            header.recency,
-            header.created_at,
-            data_updated,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or(0);
+        let updated_at = header_activity_ms(&header, composer_data);
 
         let transcript_ts = transcript_activity.get(&header.id).copied();
         let Some(status) = composer_session_status(
@@ -581,6 +567,34 @@ fn is_generating(composer_data: Option<&Value>, status: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn header_activity_ms(header: &HeaderRow, composer_data: Option<&Value>) -> i64 {
+    let data_updated = composer_data.and_then(|data| {
+        data.get("lastUpdatedAt")
+            .or_else(|| data.get("updatedAt"))
+            .and_then(|v| v.as_i64())
+    });
+    [
+        header.last_updated_at,
+        header.recency,
+        header.created_at,
+        data_updated,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0)
+}
+
+/// Inclusive/exclusive bounds for `bubbleId:{composer_id}:…` on the `cursorDiskKV` primary key.
+/// `LIKE 'prefix%'` does not use that index (SQLite LIKE is case-insensitive), and a leading-wildcard
+/// match on `value` reads the whole database.
+fn bubble_key_bounds(composer_id: &str) -> (String, String) {
+    (
+        format!("bubbleId:{composer_id}:"),
+        format!("bubbleId:{composer_id};"),
+    )
+}
+
 fn live_tool_composer_ids(
     conn: &Connection,
     headers: &[HeaderRow],
@@ -589,7 +603,7 @@ fn live_tool_composer_ids(
 ) -> HashSet<String> {
     let mut live = HashSet::new();
     let mut stmt = match conn.prepare(
-        "SELECT value FROM cursorDiskKV WHERE key LIKE ?1 AND (value LIKE '%\"status\":\"loading\"%' OR value LIKE '%\"status\":\"pending\"%' OR value LIKE '%\"status\":\"running\"%')",
+        "SELECT value FROM cursorDiskKV WHERE key >= ?1 AND key < ?2",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return live,
@@ -599,12 +613,18 @@ fn live_tool_composer_ids(
         if header.is_archived || header.is_subagent {
             continue;
         }
-        let composer_status = composer_data_by_id
-            .get(&header.id)
+        let composer_data = composer_data_by_id.get(&header.id);
+        let touched = header_activity_ms(header, composer_data);
+        if now_ms.saturating_sub(touched) > TOOL_RUNNING_LIVE_MS {
+            continue;
+        }
+        let composer_status = composer_data
             .and_then(|data| data.get("status"))
             .and_then(|v| v.as_str());
-        let pattern = format!("bubbleId:{}:%", header.id);
-        let rows = match stmt.query_map([&pattern], |row| json_from_row(row.get_ref(0)?)) {
+        let (start, end) = bubble_key_bounds(&header.id);
+        let rows = match stmt.query_map(rusqlite::params![start, end], |row| {
+            json_from_row(row.get_ref(0)?)
+        }) {
             Ok(rows) => rows,
             Err(_) => continue,
         };

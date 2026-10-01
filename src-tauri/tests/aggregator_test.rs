@@ -337,6 +337,100 @@ fn live_tool_marks_session_working() {
 }
 
 #[test]
+fn discover_uses_bubble_key_range_for_live_tools() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("state.vscdb");
+    let workspace_root = dir.path().join("workspaceStorage");
+    let transcripts_root = dir.path().join("agent-transcripts");
+    std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+    std::fs::create_dir_all(&transcripts_root).expect("transcripts dir");
+
+    let conn = Connection::open(&db_path).expect("open fixture db");
+    conn.execute_batch(
+        "
+        CREATE TABLE composerHeaders (
+            composerId TEXT PRIMARY KEY,
+            workspaceId TEXT,
+            createdAt INTEGER,
+            lastUpdatedAt INTEGER,
+            isArchived INTEGER,
+            isSubagent INTEGER,
+            recency INTEGER,
+            checkpointAt INTEGER,
+            subagentTypeName TEXT,
+            value TEXT
+        );
+        CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);
+        ",
+    )
+    .expect("create tables");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .expect("now");
+    let idle = serde_json::json!({
+        "status": "none",
+        "unifiedMode": "agent",
+        "isAgentic": true,
+        "isDraft": false,
+        "generatingBubbleIds": []
+    });
+    insert_composer(
+        &conn,
+        "tool-live",
+        serde_json::json!({
+            "composerId": "tool-live",
+            "unifiedMode": "agent",
+            "isDraft": false,
+            "name": "Tool live",
+            "workspaceIdentifier": {"uri": {"fsPath": "/Users/test/Projects/tool"}}
+        }),
+        idle.clone(),
+        now,
+    );
+    insert_composer(
+        &conn,
+        "tool-stale",
+        serde_json::json!({
+            "composerId": "tool-stale",
+            "unifiedMode": "agent",
+            "isDraft": false,
+            "name": "Tool stale",
+            "workspaceIdentifier": {"uri": {"fsPath": "/Users/test/Projects/stale"}}
+        }),
+        idle,
+        now - 2 * 60 * 60 * 1_000,
+    );
+    let bubble = serde_json::json!({
+        "startedAtMs": now,
+        "toolFormerData": { "status": "running", "name": "run_terminal_command_v2" }
+    });
+    conn.execute(
+        "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["bubbleId:tool-live:abc", bubble.to_string()],
+    )
+    .expect("insert live bubble");
+    conn.execute(
+        "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["bubbleId:tool-stale:abc", bubble.to_string()],
+    )
+    .expect("insert stale bubble");
+    conn.execute(
+        "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["bubbleId:tool-live-other:abc", bubble.to_string()],
+    )
+    .expect("insert neighboring bubble");
+    drop(conn);
+
+    let sessions = discover_from_support_paths(&db_path, &workspace_root, &transcripts_root);
+    let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec!["tool-live"]);
+    assert_eq!(sessions[0].status, AgentStatus::Working);
+}
+
+#[test]
 fn last_turn_tool_with_unfinished_is_working() {
     let now = 1_700_000_010_000;
     let (data, header) = composer(
